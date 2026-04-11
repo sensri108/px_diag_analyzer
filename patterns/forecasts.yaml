@@ -1,0 +1,28 @@
+# Predictive threshold rules for px_analyzer/predictive.py
+
+- id: FORECAST-CAPACITY
+  trigger_signal: SS-03
+  severity: WARNING
+  description: "Volume(s) at critical capacity — monitor growth rate"
+  remediation: "Expand volumes proactively before 100% causes I/O errors"
+
+- id: FORECAST-KVDB-ERRORS
+  trigger_signal: SS-14
+  severity: WARNING
+  count_threshold: 3
+  description: "KVDB gRPC errors detected at elevated rate"
+  remediation: "Monitor kvdb connectivity; escalate if error rate increases"
+
+- id: FORECAST-NODE-STATS-GAP
+  trigger_signal: SS-25
+  severity: WARNING
+  gap_count_threshold: 3
+  description: "Multiple node stats gaps suggest periodic PX process degradation"
+  remediation: "Check for periodic OOM kills or kubelet restarts correlating with gaps"
+
+- id: FORECAST-STORAGE-DOWN
+  trigger_signal: LOCAL-01
+  severity: CRITICAL
+  cluster_threshold: 5
+  description: "STATUS_STORAGE_DOWN event clustering indicates active incident"
+  remediation: "Active incident — escalate immediately. Check FC paths and storage backend."

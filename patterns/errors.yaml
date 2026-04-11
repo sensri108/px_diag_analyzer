@@ -1,0 +1,556 @@
+# ============================================================
+# VOLUME OPERATIONS — Smart Signals 1–8, 10–11
+# ============================================================
+
+- id: SS-01
+  smart_signal: volume_creation_failure_alerts
+  alert_code: 10074
+  alert_type: 38
+  source_files:
+    - misc/px-alerts-show.out
+    - var/cores/.alerts/alerts.log
+  severity: CRITICAL
+  already_monitored: true
+  schedule: "Daily 12:30 AM"
+  pattern: '"alert_type":\s*"?38"?'
+  threshold: "count >= 1 in last 24h"
+  remediation_kb: "https://pure.service-now.com/perc?id=kb_article&sysparm_article=KB0017845"
+  remediation_steps:
+    - "Check px-alerts-show.out for alert_type=38 entries"
+    - "Identify volumes with creation failures"
+    - "Review storage pool capacity and license status"
+    - "Open support case if replication failures persist"
+
+- id: SS-02
+  smart_signal: volume_resize_failure_alerts
+  alert_code: 10075
+  alert_type: null
+  source_files:
+    - misc/px-alerts-show.out
+  severity: WARNING
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: 'resize.*fail|Pending FS resize|Filesystem errors|Provisioning errors|Volume expansion failed'
+  threshold: "fail_timestamp > success_timestamp AND count > 0"
+  remediation_kb: "https://pure.service-now.com/kb_view.do?sys_kb_id=363f7ed293cf9e5c9e6dbccdfaba10a3"
+  remediation_steps:
+    - "Check for pending filesystem resize operations"
+    - "Ensure node filesystem tools (xfs_growfs, resize2fs) are available"
+    - "Verify underlying storage pool has free space"
+
+- id: SS-03
+  smart_signal: volume_space_low_alerts
+  alert_code: 10081
+  alert_type: 30
+  source_files:
+    - misc/px-alerts-show.out
+    - var/cores/.alerts/alerts.log
+  severity: CRITICAL
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: '"alert_type":\s*"?30"?'
+  threshold: "alert_type=30 within 24h (>80% used, <20% free)"
+  remediation_kb: "https://purestorage.atlassian.net/browse/PWX-41031"
+  remediation_steps:
+    - "Identify full volumes: pxctl volume list --label io_priority=HIGH"
+    - "Expand volumes: pxctl volume update --size <new_GiB> <vol_id>"
+    - "Or delete unused snapshots to reclaim space"
+    - "Alert application teams to reduce data or resize PVCs"
+
+- id: SS-04
+  smart_signal: volume_mount_failure
+  alert_code: 10103
+  alert_type: null
+  source_files:
+    - misc/px-alerts-show.out
+    - var/cores/.alerts/alerts.log
+  severity: WARNING
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: 'mount.*fail|failed to mount'
+  threshold: "fail_timestamp > success_timestamp AND fail_count >= 1"
+  remediation_kb: "https://pure.service-now.com/kb_view.do?sys_kb_id=274ae414471e2a9415f79c8a516d436b"
+  remediation_steps:
+    - "Check pod events: kubectl describe pod <pod_name>"
+    - "Check PX logs: journalctl -u portworx --since '1 hour ago'"
+    - "Verify node storage status: pxctl status"
+
+- id: SS-05
+  smart_signal: volume_delete_failure
+  alert_code: 10101
+  alert_type: 40
+  source_files:
+    - var/cores/.alerts/alerts.log
+  severity: WARNING
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: '"alert_type":\s*"?40"?'
+  threshold: "count > 1 in last 24h"
+  remediation_kb: "https://purestorage.atlassian.net/browse/PWX-41710"
+  remediation_steps:
+    - "List pending deletions: pxctl volume list"
+    - "Force delete if stuck: pxctl volume delete --force <vol_id>"
+
+- id: SS-06
+  smart_signal: volume_device_exist
+  alert_code: 10121
+  alert_type: 212
+  source_files:
+    - misc/px-alerts-show.out
+  severity: WARNING
+  already_monitored: true
+  schedule: "Hourly"
+  pattern: '"alert_type":\s*"?212"?'
+  threshold: "count > 1 in last 1h"
+  remediation_kb: "https://pure.service-now.com/kb_view.do?sys_kb_id=412bbb993b94e614b7a1c41864e45a57"
+  remediation_steps:
+    - "Check for duplicate device mappings on the node"
+    - "Inspect /dev/mapper entries and multipath status"
+
+- id: SS-07
+  smart_signal: stale_mount_found
+  alert_code: 10140
+  alert_type: null
+  source_files:
+    - "var/cores/px_status/<node>-px-jrnl-32min-<ts>.log.gz"
+  severity: WARNING
+  already_monitored: true
+  schedule: "Hourly"
+  pattern: 'Stale mount|file exists'
+  threshold: "any match in last 1h"
+  remediation_kb: "https://purestorage.atlassian.net/browse/PWX-43561"
+  remediation_steps:
+    - "Confirm stale NFS/FUSE mounts: mount | grep stale"
+    - "Schedule node reboot with customer approval"
+    - "After reboot verify: pxctl status && pxctl volume list"
+
+- id: SS-08
+  smart_signal: volume_unmount_failure_alert
+  alert_code: 10102
+  alert_type: 44
+  source_files:
+    - var/cores/.alerts/alerts.log
+  severity: WARNING
+  already_monitored: true
+  schedule: "Weekly Mon 1 AM"
+  pattern: '"alert_type":\s*"?44"?'
+  threshold: "count > 1 in last 7 days"
+  remediation_kb: "https://purestorage.atlassian.net/browse/PWX-41737"
+  remediation_steps:
+    - "Check for pods holding volume references: kubectl get pods --all-namespaces"
+    - "Force-unmount if safe: pxctl host detach <vol_id>"
+
+- id: SS-10
+  smart_signal: snapshot_creation_failure_alert
+  alert_code: 10095
+  alert_type: 48
+  source_files:
+    - var/cores/.alerts/alerts.log
+    - "var/cores/px_status/<node>-px-jrnl-32min-<ts>.log.gz"
+  severity: WARNING
+  already_monitored: true
+  schedule: "Weekly Mon"
+  pattern: '"alert_type":\s*"?48"?|Snapshot.*Failed with status input/output error'
+  threshold: "count > 1000 in last 7 days OR any I/O error snapshots"
+  remediation_kb: "https://purestorage.atlassian.net/browse/PWX-41503"
+  remediation_steps:
+    - "Correlate with STATUS_STORAGE_DOWN events — snapshots may be downstream symptom"
+    - "Check underlying storage health: pxctl storage list"
+    - "Review FlashArray connectivity if FC multipath devices present"
+
+- id: SS-11
+  smart_signal: snapshot_delete_failure
+  alert_code: 10099
+  alert_type: 63
+  source_files:
+    - var/cores/.alerts/alerts.log
+  severity: WARNING
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: '"alert_type":\s*"?63"?'
+  threshold: "count > 1 in last 24h"
+  remediation_steps:
+    - "List orphaned snapshots: pxctl volume snapshot list"
+    - "Force delete: pxctl volume snapshot delete --force <snap_id>"
+
+# ============================================================
+# KVDB — Smart Signals 12, 13, 14
+# ============================================================
+
+- id: SS-12
+  smart_signal: kvdb_out_of_space
+  alert_code: 10192
+  alert_type: null
+  source_files:
+    - misc/px-kvdb.out
+    - "var/cores/px_status/<node>-px_etcd_watch-<ts>.log.gz"
+  severity: CRITICAL
+  already_monitored: true
+  schedule: "Every 30 min"
+  pattern: 'mvcc: database space exceeded|ResourceExhausted.*etcdserver'
+  threshold: "any match"
+  remediation_steps:
+    - "Compact etcd: etcdctl compact $(etcdctl endpoint status --write-out=json | jq '.[0].Status.header.revision')"
+    - "Defragment: etcdctl defrag"
+    - "If still full, expand metadata device"
+
+- id: SS-13
+  smart_signal: kvdb_reduced_node_count_alert
+  alert_code: 10110
+  alert_type: null
+  source_files:
+    - misc/px-kvdb.out
+    - misc/px-status.out
+  severity: CRITICAL
+  already_monitored: true
+  schedule: "Hourly"
+  pattern: 'kvdb.*node.*count|reduced.*kvdb'
+  threshold: "node_count < 3 for > 5 min"
+  remediation_kb: "https://kb.purestorage.com/csm?sys_kb_id=fe70c1eb4784a694a74fef6c416d432b"
+  remediation_steps:
+    - "Check kvdb node status: pxctl service kvdb members"
+    - "Identify offline kvdb nodes and restore them"
+
+- id: SS-14
+  smart_signal: portworx_kvdb_errors
+  alert_code: 10042
+  alert_type: null
+  source_files:
+    - misc/px-kvdb.out
+    - "var/cores/px_status/<node>-px_etcd_watch-<ts>.log.gz"
+  severity: WARNING
+  already_monitored: true
+  schedule: "Every 30 min"
+  pattern: 'Failed connect to kvdb instance|grpc.*transport is closing|kvdb.*error'
+  threshold: ">= 50% nodes affected = WARNING; 100% = CRITICAL"
+  remediation_kb: "https://kb.purestorage.com/csm?sys_kb_id=96a2c5b12bbda2507b12f6c3d891bf56"
+  remediation_steps:
+    - "Check: pxctl service kvdb members"
+    - "Note: 'Failed connect to kvdb instance ([])' is EXPECTED for internal kvdb mode — log as INFO"
+    - "For gRPC transport errors: check network between kvdb nodes on port 17002"
+
+# ============================================================
+# NODE & CLUSTER HEALTH — Smart Signals 18, 21, 25, 26, 27
+# ============================================================
+
+- id: SS-18
+  smart_signal: high_node_count_alerts
+  alert_code: 10079
+  alert_type: null
+  source_files:
+    - misc/px-status.out
+  severity: WARNING
+  already_monitored: true
+  schedule: "Every 30 min"
+  pattern: 'Total Nodes:\s*(\d+)'
+  threshold: "node_count > 300"
+  remediation_steps:
+    - "If cluster approaching 300 nodes, plan for cluster split"
+    - "Review PX cluster sizing guidelines"
+
+- id: SS-21
+  smart_signal: high_node_flush_latency_alert
+  alert_code: 10133
+  alert_type: null
+  source_files:
+    - "var/lib/osd/log/px_node_stats/<timestamp>"
+  severity: WARNING
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: 'flush_ms|flush_latency'
+  threshold: "(delta_flush_ms / delta_num_flushes) > 700ms for > 15 consecutive minutes"
+  remediation_steps:
+    - "Check storage device I/O latency: iostat -x 5"
+    - "Check multipath path health: multipathd show paths"
+    - "Review FlashArray performance dashboard"
+
+- id: SS-25
+  smart_signal: px_missing_node_stats_alert
+  alert_code: 10145
+  alert_type: null
+  source_files:
+    - "var/lib/osd/log/px_node_stats/"
+  severity: WARNING
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: "gap between consecutive stat file timestamps"
+  threshold: "gap > 2100 seconds (35 minutes)"
+  remediation_steps:
+    - "Check PX process health during gap window"
+    - "Correlate with OOM events: dmesg | grep -i 'out of memory'"
+    - "Check kubelet restarts during gap period"
+
+- id: SS-26
+  smart_signal: px_node_down_alert
+  alert_code: 10109
+  alert_type: null
+  source_files:
+    - misc/px-status.out
+  severity: CRITICAL
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: 'StorageStatus.*Down|Status.*Offline|node.*down'
+  threshold: "count > 12 in 24h OR duration > 3h"
+  remediation_kb: "https://kb.purestorage.com/csm?sys_kb_id=20c0b72e3b5cee54b7a1c41864e45a00"
+  remediation_steps:
+    - "Check node status: pxctl status"
+    - "SSH to affected node and check: systemctl status portworx"
+    - "Review journal: journalctl -u portworx --since '3 hours ago'"
+
+- id: SS-27
+  smart_signal: storage_node_transition_failure_alert
+  alert_code: 10100
+  alert_type: 86
+  source_files:
+    - var/cores/.alerts/alerts.log
+    - misc/px-alerts-show.out
+  severity: WARNING
+  already_monitored: true
+  schedule: "Weekly Mon 1 AM"
+  pattern: '"alert_type":\s*"?86"?'
+  threshold: "count > 1 in last 24h"
+  remediation_steps:
+    - "Check node maintenance mode status"
+    - "Review pool transition logs"
+
+# ============================================================
+# CAPACITY & STORAGE — Smart Signals 15, 16, 17, 23
+# ============================================================
+
+- id: SS-15
+  smart_signal: capacity_alerts
+  alert_code: 10053
+  alert_type: 29
+  source_files:
+    - var/cores/.alerts/alerts.log
+    - misc/px-alerts-show.out
+  severity: WARNING
+  already_monitored: true
+  schedule: "Hourly"
+  pattern: '"alert_type":\s*"?29"?'
+  threshold: "any match (cluster at 75%+ capacity)"
+  remediation_kb: "https://kb.purestorage.com/csm?sys_kb_id=13c77d452b76f2900314fcb3d891bf20"
+  remediation_steps:
+    - "Check cluster capacity: pxctl status"
+    - "Identify largest volumes: pxctl volume list"
+    - "Add storage nodes or expand pool devices"
+
+- id: SS-16
+  smart_signal: pool_expand_failed_alert
+  alert_code: 10076
+  alert_type: null
+  source_files:
+    - var/cores/.alerts/alerts.log
+    - misc/px-alerts-show.out
+  severity: WARNING
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: 'pool.*expand.*fail|expansion.*fail'
+  threshold: "fail_timestamp > success_timestamp, count > 1 in 24h"
+  remediation_kb: "https://pure.service-now.com/perc?id=kb_article&sysparm_article=KB0018284"
+  remediation_steps:
+    - "Check pool status: pxctl service pool list"
+    - "Verify cloud drive availability or physical device"
+
+- id: SS-17
+  smart_signal: px_max_storage_nodes_alerts
+  alert_code: 10054
+  alert_type: null
+  source_files:
+    - misc/px-cluster-options.out
+    - etc/pwx/config.json
+  severity: WARNING
+  already_monitored: true
+  schedule: "Daily midnight"
+  check: "max_storage_nodes == 0 AND max_storage_nodes_per_zone == 0 AND cloud devices present"
+  remediation_steps:
+    - "Set max storage nodes: pxctl cluster options update --max-storage-nodes-per-zone <N>"
+
+- id: SS-23
+  smart_signal: px_max_storage_nodes_exceeded_alert
+  alert_code: 10123
+  alert_type: null
+  source_files:
+    - misc/px-cluster-options.out
+    - misc/px-status.out
+  severity: WARNING
+  already_monitored: true
+  schedule: "Weekly Tue"
+  check: "max_storage_nodes_per_zone > total_nodes"
+  remediation_kb: "https://kb.purestorage.com/csm?sys_kb_id=9f77ad183bcda298f199009c24e45a18"
+  remediation_steps:
+    - "Adjust max-storage-nodes-per-zone to match actual zone topology"
+
+# ============================================================
+# LICENSE — Smart Signals 19, Invalid License (10231)
+# ============================================================
+
+- id: SS-19
+  smart_signal: license_expiry_alerts
+  alert_code: 10068
+  alert_type: 58
+  source_files:
+    - misc/px-status.out
+    - var/cores/.alerts/alerts.log
+  severity: WARNING
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: '"alert_type":\s*"?58"?|expires in \d+ days'
+  threshold: "expiry within 7 days"
+  remediation_kb: "https://pure.service-now.com/kb_view.do?sys_kb_id=1a0af770931e5a50c07f779d0bba107b"
+  remediation_steps:
+    - "Contact Pure Storage licensing to renew"
+    - "Run: pxctl license inspect"
+
+- id: SS-INVALID-LICENSE
+  smart_signal: px_invalid_license
+  alert_code: 10231
+  alert_type: null
+  source_files:
+    - misc/px-status.out
+    - "var/cores/px_status/<node>-px-jrnl-32min-<ts>.log.gz"
+  severity: CRITICAL
+  already_monitored: true
+  schedule: "Daily (Pending Deployment)"
+  pattern: 'INVALID LICENSE|License is expired|meteringUsageError.*failed to send telemetry|CallHomeFailure|Metering: Disabled or Unhealthy'
+  threshold: "any match"
+  remediation_kb: "https://pure.service-now.com/kb_view.do?sys_kb_id=1a0af770931e5a50c07f779d0bba107b"
+  remediation_steps:
+    - "Check metering: look for 'Metering: Disabled or Unhealthy' in px-status.out"
+    - "Check journal for meteringUsageError or CallHomeFailure"
+    - "If grace period exceeded, cluster enters read-only mode — contact Pure immediately"
+    - "Run: pxctl license inspect && pxctl license activate <key>"
+
+# ============================================================
+# INFRASTRUCTURE — SS-22 (NFS)
+# ============================================================
+
+- id: SS-22
+  smart_signal: nfs_dependency_install_failure
+  alert_code: 10071
+  alert_type: null
+  source_files:
+    - var/cores/.alerts/alerts.log
+    - misc/px-alerts-show.out
+  severity: WARNING
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: 'NFS.*fail|nfs.*install.*fail|nfs-utils.*fail'
+  threshold: "count > 5 in 5 minutes"
+  remediation_kb: "https://kb.purestorage.com/csm?sys_kb_id=d0f5ec263b48ee5cb7a1c41864e45a9a"
+  remediation_steps:
+    - "Install NFS utilities: yum install nfs-utils -y (RHEL/CoreOS)"
+    - "Enable service: systemctl enable nfs-utils && systemctl start nfs-utils"
+
+# ============================================================
+# SECURITY — Smart Signal 9
+# ============================================================
+
+- id: SS-09
+  smart_signal: px_security_in_tree_vol_clusters
+  alert_code: 10130
+  alert_type: null
+  source_files:
+    - misc/px-status.out
+    - misc/px-volumes.out
+    - etc/pwx/config.json
+  severity: CRITICAL
+  already_monitored: true
+  schedule: "Weekly Sun"
+  check: "k8s_version < 1.32.1 (except 1.31.6) AND px_security_enabled AND in-tree volumes present"
+  remediation_steps:
+    - "Check K8s version from kubelet.out"
+    - "If vulnerable, migrate in-tree volumes to CSI before upgrading K8s"
+    - "Data loss risk during upgrades if not migrated"
+
+# ============================================================
+# INIT — Smart Signal 24
+# ============================================================
+
+- id: SS-24
+  smart_signal: px_init_failure
+  alert_code: 10096
+  alert_type: 17
+  source_files:
+    - var/cores/.alerts/alerts.log
+    - misc/px-alerts-show.out
+  severity: CRITICAL
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: '"alert_type":\s*"?17"?'
+  threshold: "count > 10 in 24h"
+  remediation_steps:
+    - "Check PX init logs: journalctl -u portworx | grep 'init'"
+    - "Verify config: cat /etc/pwx/config.json"
+    - "Check disk availability: lsblk"
+
+# ============================================================
+# LOCAL-ONLY PATTERNS (dark to Pure's Smart Signals)
+# ============================================================
+
+- id: LOCAL-01
+  smart_signal: null
+  label: STATUS_STORAGE_DOWN
+  alert_code: null
+  alert_type: null
+  source_files:
+    - "var/cores/px_status/<node>-px-jrnl-32min-<ts>.log.gz"
+  severity: CRITICAL
+  already_monitored: false
+  dark_note: "NOT monitored by any Smart Signal — only visible in local diag. Invisible to Octillion/Snowflake."
+  pattern: 'STATUS_STORAGE_DOWN'
+  threshold: "any match"
+  remediation_steps:
+    - "Correlate with snapshot I/O errors (SS-10) — storage down often causes downstream snapshot failures"
+    - "Check storage device health: pxctl storage list"
+    - "Review FC multipath paths: multipathd show paths"
+    - "Escalate to Portworx TAM with this diag — this is invisible to Pure's monitoring"
+
+- id: LOCAL-02
+  smart_signal: null
+  label: kvdb_quorum_loss_alarm
+  alert_code: null
+  alert_type: 11
+  source_files:
+    - misc/px-alerts-show.out
+  severity: CRITICAL
+  already_monitored: false
+  dark_note: "SS-13 watches live kvdb node count but does NOT parse historical quorum alarms from alerts-show.out. These uncleared alarms are not visible to Pure."
+  pattern: '"alert_type":\s*"?11"?'
+  remediation_steps:
+    - "Check quorum alarms: look for alert_type=11 in px-alerts-show.out"
+    - "Verify current quorum: pxctl service kvdb members"
+    - "Clear old alarms after verifying current health: pxctl alarms clear"
+    - "Submit as evidence to Portworx TAM — gap in SS-13 coverage"
+
+- id: LOCAL-03
+  smart_signal: null
+  label: device_mapper_thin_error
+  alert_code: null
+  alert_type: null
+  source_files:
+    - misc/dmesg.out
+  severity: WARNING
+  already_monitored: false
+  dark_note: "Device-mapper thin provisioning error at boot — not covered by any Smart Signal."
+  pattern: 'device-mapper: thin: release_metadata_snap message failed'
+  remediation_steps:
+    - "Check if error recurs after boot: dmesg | grep 'device-mapper: thin'"
+    - "If persistent, check thin pool metadata device health"
+
+- id: LOCAL-04
+  smart_signal: null
+  label: pool_offline_alarm
+  alert_code: null
+  alert_type: 83
+  source_files:
+    - misc/px-alerts-show.out
+  severity: CRITICAL
+  already_monitored: false
+  dark_note: "Proposed Smart Signal (per Tom Felczynski). Not yet deployed. Pool offline = datapool load failure."
+  pattern: '"alert_type":\s*"?83"?'
+  remediation_steps:
+    - "Check pool status: pxctl service pool list"
+    - "Look for 'Datapool load failed: failed to access pwx1/pxpool' in journal"
+    - "Check physical device and FC paths to storage"
+    - "Submit diag evidence to Portworx TAM to accelerate Smart Signal deployment"
