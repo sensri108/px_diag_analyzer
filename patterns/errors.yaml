@@ -289,7 +289,7 @@
   severity: CRITICAL
   already_monitored: true
   schedule: "Daily midnight"
-  pattern: 'StorageStatus.*Down|Status.*Offline|node.*down'
+  pattern: 'StorageStatus.*Down|Status.*Offline|node.*down|NodeStateChange.*ALARM|ALARM.*NodeStateChange|not in quorum'
   threshold: "count > 12 in 24h OR duration > 3h"
   remediation_kb: "https://kb.purestorage.com/csm?sys_kb_id=20c0b72e3b5cee54b7a1c41864e45a00"
   remediation_steps:
@@ -554,3 +554,130 @@
     - "Look for 'Datapool load failed: failed to access pwx1/pxpool' in journal"
     - "Check physical device and FC paths to storage"
     - "Submit diag evidence to Portworx TAM to accelerate Smart Signal deployment"
+
+# ============================================================
+# NODE-LEVEL FAILURE PATTERNS (detected via parse_alerts_show)
+# These are parsed from the structured JSON in px-alerts-show.out
+# and cover specific alert_type integers observed in production diags.
+# ============================================================
+
+- id: LOCAL-PX-DOWN
+  smart_signal: null
+  label: px_daemon_not_running
+  alert_code: null
+  alert_type: null
+  source_files:
+    - misc/px-status.out
+  severity: CRITICAL
+  already_monitored: false
+  dark_note: >
+    PX daemon is not running on this node. Pure's Smart Signals only monitor
+    running clusters (Octillion/Snowflake telemetry requires PX to be up).
+    A downed node is invisible to all 31 Smart Signals.
+  pattern: 'PX is not running|Could not reach.*HealthMonitor|Local storage spec not initialized'
+  remediation_steps:
+    - "SSH to node and check service status: systemctl status portworx"
+    - "Review recent journal: journalctl -u portworx --since '2 hours ago'"
+    - "Restart if safe: systemctl restart portworx"
+    - "If it fails to restart, check storage device availability: lsblk"
+    - "Open a Pure Storage support case with this diag attached"
+
+- id: LOCAL-NODE-QUORUM
+  smart_signal: px_node_down_alert
+  label: node_not_in_quorum
+  alert_code: 10109
+  alert_type: 11
+  source_files:
+    - misc/px-alerts-show.out
+  severity: CRITICAL
+  already_monitored: true
+  schedule: "Daily midnight"
+  pattern: 'not in quorum|NodeStateChange.*ALARM|port 17002'
+  remediation_steps:
+    - "Verify port 17002 is open between all PX nodes: netstat -tlnp | grep 17002"
+    - "Check firewall rules: iptables -L | grep 17002 (or firewall-cmd --list-ports)"
+    - "Verify peer node IP reachability: ping <peer_node_ip>"
+    - "On OpenShift: check OVN-Kubernetes NetworkPolicy for port 17002"
+    - "After network is restored, restart PX: systemctl restart portworx"
+
+- id: LOCAL-NODE-STARTFAIL
+  smart_signal: px_init_failure
+  label: node_start_failure
+  alert_code: 10096
+  alert_type: 9
+  source_files:
+    - misc/px-alerts-show.out
+    - misc/px-status.out
+  severity: CRITICAL
+  already_monitored: false
+  dark_note: >
+    Node start failure (alert_type=9). px_init_failure Smart Signal (10096)
+    checks for alert_type=17 (PX init failure); alert_type=9 (driver start failure)
+    is a gap — not captured by any deployed Smart Signal.
+  pattern: 'NodeStartFailure|Failed to Start driver|Failed to start cluster manager|error reading from server: EOF'
+  remediation_steps:
+    - "Check journal: journalctl -u portworx --since '2 hours ago' | grep -i error"
+    - "Verify KVDB connectivity: pxctl service kvdb members"
+    - "Check if the gRPC EOF error is caused by KVDB being down (check px-kvdb.out)"
+    - "Verify storage devices are accessible: lsblk; pvdisplay"
+    - "Restart PX after resolving underlying issue: systemctl restart portworx"
+
+- id: LOCAL-CLUSTER-MGR
+  smart_signal: null
+  label: cluster_manager_failure
+  alert_code: null
+  alert_type: 22
+  source_files:
+    - misc/px-alerts-show.out
+  severity: CRITICAL
+  already_monitored: false
+  dark_note: >
+    ClusterManagerFailure (alert_type=22). Not covered by any deployed Smart Signal.
+    Indicates PX could not register this node with the cluster coordinator.
+  pattern: 'ClusterManagerFailure|Failed to start cluster manager'
+  remediation_steps:
+    - "Check KVDB health on all nodes: pxctl service kvdb members"
+    - "Verify cluster endpoint connectivity from this node"
+    - "Check port 9001 (cluster manager): netstat -tlnp | grep 9001"
+    - "Review full PX journal for root cause before restarting: journalctl -u portworx"
+
+- id: LOCAL-STORAGE-FAIL
+  smart_signal: null
+  label: storage_initialization_failure
+  alert_code: null
+  alert_type: 54
+  source_files:
+    - misc/px-alerts-show.out
+  severity: CRITICAL
+  already_monitored: false
+  dark_note: >
+    StorageFailure (alert_type=54): PX could not load storage on this node.
+    Not captured by any deployed Smart Signal.
+  pattern: 'StorageFailure|Failed to load storage|Storage initialization check failed'
+  remediation_steps:
+    - "Check storage device status: lsblk; pxctl service pool show"
+    - "Verify block devices match config.json: cat /etc/pwx/config.json"
+    - "Check dmesg for disk/SAN errors: dmesg | grep -i error"
+    - "Check FC/iSCSI multipath paths: multipathd show paths"
+    - "If devices are missing, re-add them: pxctl service drive add"
+
+- id: LOCAL-POOL-FAIL
+  smart_signal: pool_expand_failed_alert
+  label: storage_pool_load_failure
+  alert_code: 10076
+  alert_type: 83
+  source_files:
+    - misc/px-alerts-show.out
+  severity: CRITICAL
+  already_monitored: false
+  dark_note: >
+    StoragePoolFailure (alert_type=83): datapool could not be accessed.
+    pool_expand_failed_alert (SS-16) monitors pool expansion failures but
+    does NOT cover pool load/access failures — this is a monitoring gap.
+  pattern: 'StoragePoolFailure|Datapool.*load failed|failed to access.*pxpool'
+  remediation_steps:
+    - "Identify the failing pool: look for 'Datapool N load failed' in px-status.out"
+    - "Check pool and underlying devices: pxctl service pool list; lsblk"
+    - "Check journal for I/O errors on pool devices: journalctl -u portworx | grep pool"
+    - "Verify the pwx1/pxpool path is accessible on the storage backend"
+    - "Contact Pure Storage support — pool metadata may need repair"

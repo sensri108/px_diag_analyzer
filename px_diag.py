@@ -105,32 +105,107 @@ Examples:
 
 def _collect_cluster_info(extracted_paths: list[Path]) -> dict:
     """
-    Extract cluster metadata from px-status.out and other files in the diag.
-    Returns a dict suitable for px_report.render_all().
+    Extract cluster metadata from px-status.out, px-version.out, config.json etc.
+
+    Tarballs extract to:
+        <node>/var/lib/osd/diagfiles/pwx_diag_<id>/misc/px-status.out
+
+    We use find_diag_root() (same as engine.py) to resolve the actual content root
+    before reading files, so metadata is found regardless of tarball structure.
     """
+    import json as _json
+    from px_analyzer._base import find_diag_root, find_node_root
+
     info = {
         "name":             "N/A",
         "uuid":             "N/A",
         "node_analyzed":    "N/A",
+        "hostname":         "N/A",
         "px_version":       "N/A",
         "total_nodes":      "N/A",
         "os":               "N/A",
+        "ocp_version":      "N/A",
         "kernel":           "N/A",
         "uptime":           "N/A",
         "memory_total_gib": "N/A",
         "license_info":     "N/A",
         "metering_status":  "OK",
+        "storage_type":     "N/A",
+        "cloud_provider":   "N/A",
+        "data_iface":       "N/A",
+        "mgmt_iface":       "N/A",
+        "fastpath":         False,
+        "px_running":       False,
     }
 
     if not extracted_paths:
         return info
 
-    root = extracted_paths[0]
-    info["node_analyzed"] = root.name
+    extracted_root = extracted_paths[0]
+    info["node_analyzed"] = extracted_root.name
 
+    # Resolve to the actual diag content root (handles pwx_diag_<id> nesting)
+    root = find_diag_root(extracted_root)
+    node_root = find_node_root(root)
+
+    # px-version.out — most reliable version source
+    version_file = root / "misc" / "px-version.out"
+    if version_file.exists():
+        v = version_file.read_text(errors="replace").strip()
+        # "pxctl version 3.5.2.0-86e5708 (OCI)"
+        m = re.search(r'version\s+(\S+)', v, re.IGNORECASE)
+        if m:
+            info["px_version"] = m.group(1)
+
+    # config.json — reliable cluster name, storage type, interfaces, fastpath
+    config_file = root / "etc" / "pwx" / "config.json"
+    if config_file.exists():
+        try:
+            cfg = _json.loads(config_file.read_text(errors="replace"))
+            if cfg.get("clusterid"):
+                info["name"] = cfg["clusterid"]
+            # Storage drives / type
+            drives = cfg.get("storage", {}).get("devices", [])
+            if drives:
+                first = drives[0]
+                if first.startswith("/dev/nvme"):
+                    info["storage_type"] = "NVMe"
+                elif first.startswith("/dev/sd"):
+                    info["storage_type"] = "SSD/HDD"
+                elif first.startswith("/dev/mapper") or first.startswith("/dev/dm"):
+                    info["storage_type"] = "LVM"
+                else:
+                    info["storage_type"] = first
+            # Network interfaces
+            ifaces = cfg.get("network", {})
+            if ifaces.get("dataInterface"):
+                info["data_iface"] = ifaces["dataInterface"]
+            if ifaces.get("managementInterface"):
+                info["mgmt_iface"] = ifaces["managementInterface"]
+            # Cloud provider / env
+            provider = cfg.get("env", "") or cfg.get("cloud_provider", "")
+            if provider:
+                info["cloud_provider"] = provider
+            # Fastpath (CSI fastpath or kernel module)
+            fp = cfg.get("fastpath") or cfg.get("csi", {}).get("enable_csi_driver_grpc", False)
+            if fp:
+                info["fastpath"] = True
+        except Exception:
+            pass
+
+    # px-status.out — remaining fields + px_running detection
     px_status = root / "misc" / "px-status.out"
     if px_status.exists():
         content = px_status.read_text(encoding="utf-8", errors="replace")
+        # Detect if PX is running: "Status: PX is operational" or similar
+        if re.search(r'Status\s*:\s*PX is (operational|running|OK)', content, re.IGNORECASE):
+            info["px_running"] = True
+        elif re.search(r'PX is not running', content, re.IGNORECASE):
+            info["px_running"] = False
+        else:
+            # Heuristic: if we can read cluster info, PX was likely up
+            info["px_running"] = bool(re.search(r'Cluster\s+(Name|ID)\s*:', content, re.IGNORECASE))
+
         field_patterns = {
             "name":            r"Cluster\s+Name\s*:\s*(.+)",
             "uuid":            r"Cluster\s+ID\s*:\s*([0-9a-f\-]+)",
@@ -144,7 +219,61 @@ def _collect_cluster_info(extracted_paths: list[Path]) -> dict:
         for key, pat in field_patterns.items():
             m = re.search(pat, content, re.IGNORECASE | re.MULTILINE)
             if m:
-                info[key] = m.group(1).strip()
+                val = m.group(1).strip()
+                # Only overwrite if not already set from a more-reliable source
+                if info[key] == "N/A" or key not in ("name", "px_version"):
+                    info[key] = val
+
+        # Data/mgmt interfaces from px-status if not found in config.json
+        if info["data_iface"] == "N/A":
+            m = re.search(r'Data\s+IP\s*:\s*(\S+)', content, re.IGNORECASE)
+            if m:
+                info["data_iface"] = m.group(1)
+        if info["mgmt_iface"] == "N/A":
+            m = re.search(r'Mgmt\s+IP\s*:\s*(\S+)', content, re.IGNORECASE)
+            if m:
+                info["mgmt_iface"] = m.group(1)
+
+        # Fastpath from status output
+        if not info["fastpath"] and re.search(r'Fastpath\s*:\s*(enabled|yes|true)', content, re.IGNORECASE):
+            info["fastpath"] = True
+
+    # uname.out — hostname
+    uname_file = root / "misc" / "uname.out"
+    if uname_file.exists():
+        uname = uname_file.read_text(errors="replace").strip()
+        # uname -a: "Linux pxpvip1331823 5.14.0-427.37.1.el9_4.x86_64 ..."
+        parts = uname.split()
+        if len(parts) >= 2:
+            info["hostname"] = parts[1]
+        if info["kernel"] == "N/A" and len(parts) >= 3:
+            info["kernel"] = parts[2]
+    else:
+        # Fallback: use node_root directory name as hostname
+        info["hostname"] = node_root.name
+
+    # OCP version — try host-os-release first, then /etc/os-release
+    for os_release_path in [
+        root / "log" / "extras" / "host-os-release",
+        node_root / "etc" / "os-release",
+        root / "etc" / "os-release",
+    ]:
+        if os_release_path.exists():
+            content = os_release_path.read_text(errors="replace")
+            # OpenShift: PRETTY_NAME="Red Hat Enterprise Linux CoreOS 414.92.202409..."
+            m = re.search(r'OPENSHIFT_VERSION\s*=\s*"?([^"\n]+)"?', content, re.IGNORECASE)
+            if m:
+                info["ocp_version"] = m.group(1).strip()
+                break
+            m = re.search(r'PRETTY_NAME\s*=\s*"?([^"\n]+)"?', content)
+            if m:
+                pretty = m.group(1).strip()
+                # Only set ocp_version if it mentions OpenShift/RHCOS
+                if "openshift" in pretty.lower() or "coreos" in pretty.lower():
+                    info["ocp_version"] = pretty
+                elif info["os"] == "N/A":
+                    info["os"] = pretty
+                break
 
     uptime_file = root / "misc" / "uptime.out"
     if uptime_file.exists():
