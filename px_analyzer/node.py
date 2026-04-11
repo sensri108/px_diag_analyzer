@@ -22,7 +22,10 @@ from datetime import datetime
 from pathlib import Path
 
 from px_analyzer.engine import Finding, make_finding
-from px_analyzer._base import scan_file, read_gz_or_plain, parse_alerts_show
+from px_analyzer._base import (
+    scan_file, read_gz_or_plain, parse_alerts_show,
+    parse_alerts_log, find_node_root,
+)
 
 log = logging.getLogger(__name__)
 
@@ -40,8 +43,15 @@ _ALERT_TYPE_TO_PATTERN: dict[int, str] = {
 def analyze(extracted_path: Path, pattern_map: dict) -> list[Finding]:
     findings: list[Finding] = []
 
+    node_root      = pattern_map.get("_node_root", find_node_root(extracted_path))
     px_status_path = extracted_path / "misc" / "px-status.out"
     px_alerts_path = extracted_path / "misc" / "px-alerts-show.out"
+    alerts_log_path = node_root / "var" / "cores" / ".alerts" / "alerts.log"
+
+    # ── 0. Heap/stack dump detection ─────────────────────────────────────────
+    # These live in var/cores/ at the node root level, NOT in pwx_diag_*
+    cores_dir = node_root / "var" / "cores"
+    _check_heap_dumps(cores_dir, pattern_map, findings)
 
     # ── 1. PX daemon down ─────────────────────────────────────────────────────
     # "PX is not running" / "Could not reach 'HealthMonitor'" appears when the
@@ -56,11 +66,14 @@ def analyze(extracted_path: Path, pattern_map: dict) -> list[Finding]:
                 count=len(matches),
             ))
 
-    # ── 2. Alert-type-based findings from px-alerts-show.out ─────────────────
-    # Parse the JSON alerts array (mixed with header/footer text in the file).
-    # Each alert has an alert_type integer that maps to a known failure mode.
-    alerts = parse_alerts_show(px_alerts_path)
-    log.info(f"Parsed {len(alerts)} alert(s) from {px_alerts_path.name}")
+    # ── 2. Alert-type-based findings from alerts.log (NDJSON full history) ───
+    # Prefer the full NDJSON log; fall back to px-alerts-show.out (5 alerts)
+    alerts = parse_alerts_log(alerts_log_path)
+    if alerts:
+        log.info(f"Parsed {len(alerts)} historical alert(s) from {alerts_log_path.name}")
+    else:
+        alerts = parse_alerts_show(px_alerts_path)
+        log.info(f"Parsed {len(alerts)} alert(s) from {px_alerts_path.name}")
 
     seen_types: set[int] = set()
     for alert in alerts:
@@ -115,6 +128,65 @@ def analyze(extracted_path: Path, pattern_map: dict) -> list[Finding]:
         _check_stats_gaps(stat_files, pattern_map, findings)
 
     return findings
+
+
+def _check_heap_dumps(
+    cores_dir: Path,
+    pattern_map: dict,
+    findings: list[Finding],
+) -> None:
+    """
+    Detect heap and stack dump files in var/cores/.
+    These indicate memory pressure / OOM events that caused PX to dump state.
+    """
+    if not cores_dir.exists():
+        return
+
+    heap_files  = sorted(cores_dir.glob("*.heap.gz"))
+    stack_files = sorted(cores_dir.glob("*.stack.gz"))
+
+    if not heap_files and not stack_files:
+        return
+
+    dump_list = (
+        [f"[HEAP]  {f.name}" for f in heap_files] +
+        [f"[STACK] {f.name}" for f in stack_files]
+    )
+    excerpt = (
+        f"{len(heap_files)} heap dump(s) and {len(stack_files)} stack dump(s) found in var/cores/.\n"
+        + "\n".join(dump_list[:8])
+    )
+
+    # Use LOCAL-PX-DOWN pattern as the closest match (memory dump → PX crashed)
+    if "LOCAL-PX-DOWN" in pattern_map:
+        # Create a separate heap-dump finding with its own label
+        findings.append(Finding(
+            id="LOCAL-HEAP-DUMP",
+            smart_signal=None,
+            alert_code=None,
+            alert_type=None,
+            severity="WARNING",
+            category="node",
+            pattern_matched="*.heap.gz / *.stack.gz",
+            log_excerpt=excerpt,
+            source_file="var/cores/",
+            first_seen=heap_files[0].name if heap_files else stack_files[0].name,
+            last_seen=(heap_files or stack_files)[-1].name,
+            count=len(heap_files) + len(stack_files),
+            already_monitored=False,
+            dark_to_smart_signals=True,
+            dark_note="Heap/stack dumps indicate PX memory pressure or crash events. Not monitored by any Smart Signal.",
+            remediation_kb=None,
+            remediation_steps=[
+                f"Found {len(heap_files)} heap dump(s) and {len(stack_files)} stack dump(s) in var/cores/",
+                "Heap dumps indicate PX ran out of memory or crashed — check node memory: free -h",
+                "Review px_info.log in var/cores/ for the crash context",
+                "Check node resource pressure: cat /proc/meminfo; top -b -n1 | head -20",
+                "Open a Pure Storage support case and attach all .heap.gz and .stack.gz files",
+                "Consider increasing node memory or reducing PX memory limits",
+            ],
+            extra={"heap_count": len(heap_files), "stack_count": len(stack_files), "files": dump_list},
+        ))
 
 
 def _check_flush_latency(

@@ -145,6 +145,11 @@ def run_analysis(extracted_path: Path, cluster_uuid: str) -> list[Finding]:
     diag_root = find_diag_root(extracted_path)
     log.info(f"Analyzing diag root: {diag_root}")
 
+    # Store node_root (the original top-level extracted directory) so analyzers
+    # can access var/cores/.alerts/alerts.log, heap dumps, etc. that live there.
+    # We inject it into pattern_map so all analyzers can read it without API changes.
+    pattern_map["_node_root"] = extracted_path
+
     # Import all analyzer modules
     from px_analyzer import (
         volume, kvdb, storage, node, capacity,

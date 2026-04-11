@@ -20,6 +20,125 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+def find_node_root(diag_root: Path) -> Path:
+    """
+    Given the resolved pwx_diag_<id> root, walk UP to find the node-level
+    extracted directory — the one that contains var/cores/.alerts/alerts.log,
+    var/cores/*.heap.gz, etc.
+
+    Structure after extraction + find_diag_root():
+        <node>/                              ← node root (what we want here)
+          var/cores/.alerts/alerts.log
+          var/cores/*.heap.gz
+          var/lib/osd/diagfiles/
+            pwx_diag_<id>/                   ← diag_root (what find_diag_root returns)
+              misc/px-status.out
+              ...
+
+    If diag_root already has var/cores/ as a child, return it unchanged.
+    """
+    # Already at node root?
+    if (diag_root / "var" / "cores").exists():
+        return diag_root
+
+    # Walk up: pwx_diag_* → diagfiles → osd → lib → var → <node>
+    candidate = diag_root
+    for _ in range(6):
+        candidate = candidate.parent
+        if (candidate / "var" / "cores").exists():
+            log.debug(f"find_node_root: resolved {diag_root.name} → {candidate.name}")
+            return candidate
+
+    log.warning(f"find_node_root: could not find var/cores above {diag_root}; using diag_root")
+    return diag_root
+
+
+def parse_alerts_log(path: Path) -> list[dict]:
+    """
+    Parse NDJSON var/cores/.alerts/alerts.log.
+
+    Each line is a JSON object:
+      {"severity": 1, "alert_type": 9, "message": "...",
+       "timestamp": {"seconds": 1774156790}, "resource_id": "...", ...}
+
+    severity: 1=ALARM, 2=WARNING, 3=INFO/NOTIFY
+    Returns normalized dicts with keys: severity, severity_str, alert_type,
+    alert_name, message, timestamp, resource_id, count, cleared
+    """
+    from datetime import datetime, timezone
+
+    SEVERITY_MAP = {1: "ALARM", 2: "WARNING", 3: "INFO"}
+    ALERT_TYPE_NAMES = {
+        9:   "NodeStartFailure",
+        10:  "NodeReady",
+        11:  "NodeStateChange / NotInQuorum",
+        22:  "ClusterManagerFailure",
+        29:  "CapacityAlert",
+        30:  "VolumeSpaceLow",
+        36:  "NodeMarkedDown",
+        37:  "VolumeCreated",
+        38:  "VolumeCreationFailure",
+        39:  "VolumeDeleted",
+        40:  "VolumeDeleteFailure",
+        44:  "VolumeUnmountFailure",
+        47:  "SnapshotCreated",
+        48:  "SnapshotCreationFailure",
+        54:  "StorageFailure",
+        58:  "LicenseExpiry",
+        63:  "SnapshotDeleteFailure",
+        65:  "VolumeSpaceRegained",
+        83:  "StoragePoolFailure",
+        86:  "StorageNodeTransition",
+        104: "SIGTERMReceived",
+        106: "KVDBBootstrapFailure",
+        212: "VolumeDeviceExists",
+        261: "DeviceReplicaRemoved",
+    }
+
+    if not path or not path.exists():
+        return []
+
+    alerts = []
+    for line in path.read_text(errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        sev_num  = int(obj.get("severity", 3))
+        at       = int(obj.get("alert_type", -1))
+        ts_block = obj.get("timestamp", {})
+        if isinstance(ts_block, dict):
+            ts_sec = ts_block.get("seconds", 0)
+        else:
+            ts_sec = int(ts_block) if ts_block else 0
+
+        if ts_sec:
+            try:
+                ts_str = datetime.fromtimestamp(ts_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            except (OSError, OverflowError):
+                ts_str = str(ts_sec)
+        else:
+            ts_str = "unknown"
+
+        cleared = bool(obj.get("cleared", False))
+        alerts.append({
+            "severity":     sev_num,
+            "severity_str": SEVERITY_MAP.get(sev_num, str(sev_num)),
+            "alert_type":   at,
+            "alert_name":   ALERT_TYPE_NAMES.get(at, f"AlertType_{at}"),
+            "message":      str(obj.get("message", "")),
+            "timestamp":    ts_str,
+            "resource_id":  str(obj.get("resource_id", "")),
+            "count":        int(obj.get("count", 1)),
+            "cleared":      cleared,
+        })
+    return alerts
+
+
 def find_diag_root(extracted_path: Path) -> Path:
     """
     Find the actual diag content root inside an extracted auto-diag tarball.
