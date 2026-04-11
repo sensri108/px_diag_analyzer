@@ -12,7 +12,13 @@ diagnostic tarballs, analyzes them, and maps findings to Portworx Smart Signals.
 ## Install
 
 ```bash
+# Install the Prerequisites 
 pip install -r requirements.txt
+```
+```bash
+# Clone the repo locally 
+git clone https://github.com/sensri108/px_diag_analyzer.git
+cd px_diag_analyzer
 ```
 
 ## Usage
