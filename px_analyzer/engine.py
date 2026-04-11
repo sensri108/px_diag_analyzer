@@ -134,8 +134,16 @@ def run_analysis(extracted_path: Path, cluster_uuid: str) -> list[Finding]:
     Run all analyzer modules against the extracted diag directory.
     Returns a severity-sorted, correlated list of Finding objects.
     """
+    from px_analyzer._base import find_diag_root
+
     patterns = load_patterns()
     pattern_map = {p["id"]: p for p in patterns}
+
+    # Resolve the actual diag content root.
+    # Tarballs extract to <node>/var/lib/osd/diagfiles/pwx_diag_<id>/misc/...
+    # After hostname stripping, files land under pwx_diag_<id>/ not the top level.
+    diag_root = find_diag_root(extracted_path)
+    log.info(f"Analyzing diag root: {diag_root}")
 
     # Import all analyzer modules
     from px_analyzer import (
@@ -158,14 +166,14 @@ def run_analysis(extracted_path: Path, cluster_uuid: str) -> list[Finding]:
     all_findings: list[Finding] = []
     for fn in analyzers:
         try:
-            results = fn(extracted_path, pattern_map)
+            results = fn(diag_root, pattern_map)
             all_findings.extend(results)
         except Exception as e:
             log.warning(f"Analyzer {fn.__module__} failed: {e}", exc_info=True)
 
     # Predictive pass (depends on all prior findings)
     try:
-        pf = predictive.analyze(extracted_path, all_findings, patterns)
+        pf = predictive.analyze(diag_root, all_findings, patterns)
         all_findings.extend(pf)
     except Exception as e:
         log.warning(f"Predictive analyzer failed: {e}", exc_info=True)

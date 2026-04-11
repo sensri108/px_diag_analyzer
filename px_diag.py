@@ -105,9 +105,17 @@ Examples:
 
 def _collect_cluster_info(extracted_paths: list[Path]) -> dict:
     """
-    Extract cluster metadata from px-status.out and other files in the diag.
-    Returns a dict suitable for px_report.render_all().
+    Extract cluster metadata from px-status.out, px-version.out, config.json etc.
+
+    Tarballs extract to:
+        <node>/var/lib/osd/diagfiles/pwx_diag_<id>/misc/px-status.out
+
+    We use find_diag_root() (same as engine.py) to resolve the actual content root
+    before reading files, so metadata is found regardless of tarball structure.
     """
+    import json as _json
+    from px_analyzer._base import find_diag_root
+
     info = {
         "name":             "N/A",
         "uuid":             "N/A",
@@ -125,9 +133,32 @@ def _collect_cluster_info(extracted_paths: list[Path]) -> dict:
     if not extracted_paths:
         return info
 
-    root = extracted_paths[0]
-    info["node_analyzed"] = root.name
+    extracted_root = extracted_paths[0]
+    info["node_analyzed"] = extracted_root.name
 
+    # Resolve to the actual diag content root (handles pwx_diag_<id> nesting)
+    root = find_diag_root(extracted_root)
+
+    # px-version.out — most reliable version source
+    version_file = root / "misc" / "px-version.out"
+    if version_file.exists():
+        v = version_file.read_text(errors="replace").strip()
+        # "pxctl version 3.5.2.0-86e5708 (OCI)"
+        m = re.search(r'version\s+(\S+)', v, re.IGNORECASE)
+        if m:
+            info["px_version"] = m.group(1)
+
+    # config.json — reliable cluster name and scheduler
+    config_file = root / "etc" / "pwx" / "config.json"
+    if config_file.exists():
+        try:
+            cfg = _json.loads(config_file.read_text(errors="replace"))
+            if cfg.get("clusterid"):
+                info["name"] = cfg["clusterid"]
+        except Exception:
+            pass
+
+    # px-status.out — remaining fields (may be empty if PX was down when diag was taken)
     px_status = root / "misc" / "px-status.out"
     if px_status.exists():
         content = px_status.read_text(encoding="utf-8", errors="replace")
@@ -144,7 +175,10 @@ def _collect_cluster_info(extracted_paths: list[Path]) -> dict:
         for key, pat in field_patterns.items():
             m = re.search(pat, content, re.IGNORECASE | re.MULTILINE)
             if m:
-                info[key] = m.group(1).strip()
+                val = m.group(1).strip()
+                # Only overwrite if not already set from a more-reliable source
+                if info[key] == "N/A" or key not in ("name", "px_version"):
+                    info[key] = val
 
     uptime_file = root / "misc" / "uptime.out"
     if uptime_file.exists():

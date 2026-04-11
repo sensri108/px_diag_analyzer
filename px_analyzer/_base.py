@@ -2,11 +2,12 @@
 px_analyzer/_base.py — Shared scan utilities used by all analyzer modules.
 
 Functions:
-    scan_file(path, pattern)   -> list of {line, timestamp, lineno}
-    find_files(root, glob)     -> list of matching Paths
-    read_gz_or_plain(path)     -> str
-    parse_alerts_show(path)    -> list of alert dicts
-    ts_from_line(line)         -> ISO timestamp string or "unknown"
+    find_diag_root(extracted_path) -> Path to actual diag content root
+    scan_file(path, pattern)       -> list of {line, timestamp, lineno}
+    find_files(root, glob)         -> list of matching Paths
+    read_gz_or_plain(path)         -> str
+    parse_alerts_show(path)        -> list of alert dicts
+    ts_from_line(line)             -> ISO timestamp string or "unknown"
 """
 from __future__ import annotations
 
@@ -17,6 +18,45 @@ import re
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+def find_diag_root(extracted_path: Path) -> Path:
+    """
+    Find the actual diag content root inside an extracted auto-diag tarball.
+
+    Auto-diag tarballs extract to:
+        <node>/var/lib/osd/diagfiles/pwx_diag_<id>/misc/px-status.out
+        <node>/var/lib/osd/diagfiles/pwx_diag_<id>/var/lib/osd/log/...
+
+    After px_extract strips the hostname prefix, files land at:
+        <extracted_root>/var/lib/osd/diagfiles/pwx_diag_<id>/misc/px-status.out
+
+    This function resolves the pwx_diag_<id> subdirectory so that analyzers
+    can look for misc/px-status.out relative to the returned path.
+
+    Returns extracted_path unchanged if already at content root (misc/ exists).
+    """
+    # Already at content root (flat structure or previously resolved)
+    if (extracted_path / "misc").is_dir():
+        return extracted_path
+
+    diagfiles_dir = extracted_path / "var" / "lib" / "osd" / "diagfiles"
+    if diagfiles_dir.is_dir():
+        candidates = sorted([
+            d for d in diagfiles_dir.iterdir()
+            if d.is_dir() and d.name.startswith("pwx_diag_")
+        ])
+        if candidates:
+            chosen = candidates[-1]  # latest if multiple pwx_diag_* dirs
+            log.info(f"Resolved diag root: {extracted_path.name} → {chosen.name}")
+            return chosen
+
+    log.warning(
+        f"Could not find pwx_diag_* under {extracted_path}; using it as-is. "
+        "Verify the tarball extracted correctly."
+    )
+    return extracted_path
+
 
 # Timestamp patterns found in PX logs
 _TS_PATTERNS = [
@@ -97,10 +137,22 @@ def parse_alerts_show(path: Path) -> list[dict]:
     """
     Parse px-alerts-show.out into a list of alert dicts.
 
-    Tries three strategies:
-    1. Full JSON array parse
+    The actual file format mixes non-JSON header lines with a JSON array:
+        time="..." level=error msg="..."
+        PX is not running on 127.0.0.1 host: ...
+        [{
+         "id": "0",
+         "alert_type": "11",
+         ...
+        },{...}]
+        Collected at: ...
+        Error executing ...
+
+    Tries four strategies (in order):
+    0. Extract embedded JSON array by finding first '[' and last ']'
+    1. Full JSON array parse (for clean files)
     2. Newline-delimited JSON objects (one per line)
-    3. Regex fallback: extract alert_type, message, cleared fields
+    3. Multi-line regex: scan all lines for alert_type, then look ±3 lines for message
 
     Returns list of dicts with at least: alert_type, message, cleared, timestamp
     """
@@ -111,7 +163,22 @@ def parse_alerts_show(path: Path) -> list[dict]:
     if not content:
         return []
 
-    # Strategy 1: full JSON array
+    # Strategy 0: extract the JSON array embedded in mixed content
+    # Real file starts with error log lines, then a JSON array, then footer lines.
+    start = content.find('[')
+    end   = content.rfind(']')
+    if start != -1 and end > start:
+        try:
+            data = json.loads(content[start:end + 1])
+            if isinstance(data, list):
+                result = [_normalize_alert(a) for a in data if isinstance(a, dict)]
+                if result:
+                    log.debug(f"parse_alerts_show: strategy 0 found {len(result)} alerts in {path.name}")
+                    return result
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 1: full JSON array parse
     try:
         data = json.loads(content)
         if isinstance(data, list):
@@ -119,7 +186,7 @@ def parse_alerts_show(path: Path) -> list[dict]:
     except json.JSONDecodeError:
         pass
 
-    # Strategy 2: newline-delimited JSON
+    # Strategy 2: newline-delimited JSON objects
     alerts = []
     for line in content.splitlines():
         line = line.strip()
@@ -134,26 +201,34 @@ def parse_alerts_show(path: Path) -> list[dict]:
     if alerts:
         return alerts
 
-    # Strategy 3: regex fallback
-    alerts = []
+    # Strategy 3: multi-line regex fallback
+    # Fields are on separate lines; scan all lines for alert_type then look nearby
+    lines = content.splitlines()
     at_pat  = re.compile(r'"alert_type"\s*:\s*"?(\d+)"?')
     msg_pat = re.compile(r'"message"\s*:\s*"([^"]*)"')
     clr_pat = re.compile(r'"cleared"\s*:\s*(true|false)', re.IGNORECASE)
+    ts_pat  = re.compile(r'"timestamp"\s*:\s*"([^"]*)"')
+    cnt_pat = re.compile(r'"count"\s*:\s*"?(\d+)"?')
 
-    for line in content.splitlines():
+    alerts = []
+    for i, line in enumerate(lines):
         at_m = at_pat.search(line)
         if not at_m:
             continue
-        msg_m = msg_pat.search(line)
-        clr_m = clr_pat.search(line)
+        # Look in a ±8 line window for related fields
+        window = "\n".join(lines[max(0, i - 2):i + 9])
+        msg_m = msg_pat.search(window)
+        clr_m = clr_pat.search(window)
+        ts_m  = ts_pat.search(window)
+        cnt_m = cnt_pat.search(window)
         alerts.append({
             "alert_type": int(at_m.group(1)),
-            "message": msg_m.group(1) if msg_m else "",
-            "cleared": clr_m.group(1).lower() == "true" if clr_m else False,
-            "timestamp": ts_from_line(line),
-            "count": 1,
-            "node_id": "",
-            "raw": line.strip(),
+            "message":    msg_m.group(1) if msg_m else "",
+            "cleared":    clr_m.group(1).lower() == "true" if clr_m else False,
+            "timestamp":  ts_m.group(1) if ts_m else ts_from_line(line),
+            "count":      int(cnt_m.group(1)) if cnt_m else 1,
+            "node_id":    "",
+            "raw":        line.strip(),
         })
     return alerts
 
