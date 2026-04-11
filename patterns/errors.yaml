@@ -616,7 +616,7 @@
     is a gap — not captured by any deployed Smart Signal.
   pattern: 'NodeStartFailure|Failed to Start driver|Failed to start cluster manager|error reading from server: EOF'
   remediation_steps:
-    - "Check journal: journalctl -u portworx --since '2 hours ago' | grep -i 'error\|fail'"
+    - "Check journal: journalctl -u portworx --since '2 hours ago' | grep -i error"
     - "Verify KVDB connectivity: pxctl service kvdb members"
     - "Check if the gRPC EOF error is caused by KVDB being down (check px-kvdb.out)"
     - "Verify storage devices are accessible: lsblk; pvdisplay"
@@ -657,7 +657,7 @@
   remediation_steps:
     - "Check storage device status: lsblk; pxctl service pool show"
     - "Verify block devices match config.json: cat /etc/pwx/config.json"
-    - "Check dmesg for disk/SAN errors: dmesg | grep -i 'error\|i/o\|fail'"
+    - "Check dmesg for disk/SAN errors: dmesg | grep -i error"
     - "Check FC/iSCSI multipath paths: multipathd show paths"
     - "If devices are missing, re-add them: pxctl service drive add"
 
@@ -678,6 +678,6 @@
   remediation_steps:
     - "Identify the failing pool: look for 'Datapool N load failed' in px-status.out"
     - "Check pool and underlying devices: pxctl service pool list; lsblk"
-    - "Check journal for I/O errors on pool devices: journalctl -u portworx | grep 'pool\|pxpool'"
+    - "Check journal for I/O errors on pool devices: journalctl -u portworx | grep pool"
     - "Verify the pwx1/pxpool path is accessible on the storage backend"
     - "Contact Pure Storage support — pool metadata may need repair"

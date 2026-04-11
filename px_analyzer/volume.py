@@ -16,7 +16,9 @@ from px_analyzer._base import parse_alerts_show, find_files, scan_file
 
 log = logging.getLogger(__name__)
 
-# Map alert_type integers to pattern IDs
+# Map alert_type integers to pattern IDs.
+# Note: alert_type 9, 11, 22, 54, 83 are handled by node.py (LOCAL-NODE-* patterns)
+# to avoid duplicate findings.
 ALERT_TYPE_MAP = {
     38:  "SS-01",           # volume creation failure
     30:  "SS-03",           # volume space low
@@ -28,8 +30,6 @@ ALERT_TYPE_MAP = {
     17:  "SS-24",           # PX init failure
     86:  "SS-27",           # node transition failure
     58:  "SS-19",           # license expiry
-    11:  "LOCAL-02",        # quorum loss alarm
-    83:  "LOCAL-04",        # pool offline
     29:  "SS-15",           # capacity alert
 }
 
