@@ -15,9 +15,14 @@ import os
 import subprocess
 
 import paramiko
-from paramiko.agent import AgentRequestHandler
+from paramiko.agent import AgentKey, AgentRequestHandler
 
 log = logging.getLogger(__name__)
+
+# Paramiko's AgentKey is missing the `public_blob` attribute checked by the
+# auth handler on Python 3.12+ / newer paramiko builds. Patch it once at import.
+if not hasattr(AgentKey, "public_blob"):
+    AgentKey.public_blob = None  # type: ignore[attr-defined]
 
 FUSE_HOST = "fuse"
 FUSE_PORT = 22
