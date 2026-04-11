@@ -19,10 +19,10 @@ pip install -r requirements.txt
 
 ```bash
 # Full pipeline (auth → download → extract → analyze → report)
-python px_diag.py --cluster-uuid b9462820-8db9-4088-9801-563dcc31d237
+python px_diag.py --cluster-uuid <UUID>
 
 # Specific node only
-python px_diag.py --cluster-uuid <UUID> --node pxpvip1331919.gsm1900.org
+python px_diag.py --cluster-uuid <UUID> --node <node name>
 
 # Analyze already-downloaded/extracted local path (skip Fuse2)
 python px_diag.py --cluster-uuid <UUID> --local-path ~/downloads/<UUID>/
