@@ -31,22 +31,26 @@ Implemented via `paramiko` with `AgentRequestHandler`. Credentials are captured 
 
 ---
 
-## Part 2 — Fuse2 Path Format
+## Part 2 — Fuse2 Path Format (Confirmed)
 
 ```
-/fuse2/px_aid/<CLUSTER_UUID>/<YYYY_MM_DD>/<NODE>-auto-diags-<YYYYMMDDHHMMSS>.tar.gz
+/fuse2/px_aid/<UUID of the Portworx cluster>/<YYYY_MM_DD>/<node name>-auto-diags-<YYYYMMDDHHMMSS>.tar.gz
 ```
 
-**Live example:**
+**Confirmed live example:**
 ```
 /fuse2/px_aid/b9462820-8db9-4088-9801-563dcc31d237/2026_04_10/pxpvip1331919.gsm1900.org-auto-diags-20260410052348.tar.gz
 ```
 
-Note: date folder uses underscores (`2026_04_10`). The tool sorts date folders descending and selects the latest. Per-node diag files within the date folder are sorted by timestamp suffix — latest wins unless `--node` is specified.
+**Critical details (confirmed from environment):**
+- **Base path:** `/fuse2/px_aid/` (not `/fuse/` or `/fuse1/`)
+- **Date folder format:** `YYYY_MM_DD` with **underscores**, NOT dashes — e.g., `2026_04_10`
+- **Tarball naming:** `<node>-auto-diags-<YYYYMMDDHHMMSS>.tar.gz` — the separator is exactly `-auto-diags-` (dashes both sides)
+- **Selection strategy:** Date folders sorted descending → latest selected. Multiple tarballs per node → latest by timestamp suffix wins. Pass `--date YYYY_MM_DD` to override, `--node <hostname>` to limit to one node.
 
-**Also present in the same date folder (from your environment):**
-- `<node>-px-kvdb-dump-diags-<ts>.log.gz` — separate kvdb dump logs per node, multiple per day
-- Multiple auto-diag tarballs per node (one per scheduled diag interval)
+**Also present in the same date folder:**
+- `<node>-px-kvdb-dump-diags-<ts>.log.gz` — kvdb dump logs, multiple per day (skipped by the auto-diag filter)
+- Multiple auto-diag tarballs per node (one per scheduled diag interval — latest wins)
 
 ---
 
