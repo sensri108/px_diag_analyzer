@@ -11,13 +11,14 @@ Fuse2 path format (confirmed):
     Note: date folders use underscores (2026_04_10), NOT dashes.
 
 Strategy:
-    1. List date folders under /fuse2/px_aid/<UUID>/, sort descending, pick latest
-       (or use date_override if specified — format: YYYY_MM_DD with underscores)
-    2. List all -auto-diags-*.tar.gz files in the date folder
-    3. If node_filter specified, only download matching files
-    4. Per node, keep only the latest tarball (sorted by timestamp suffix)
-    5. Download to ~/downloads/<UUID>/<YYYY_MM_DD>/<filename>
-    6. Return list of local Paths to downloaded files
+    1. List all date folders under /fuse2/px_aid/<UUID>/, sort descending (newest first)
+    2. Walk folders newest-first; skip any that contain no -auto-diags-*.tar.gz files
+       (auto-diag bundles are not always generated every day — fall back up to 7 days)
+    3. If --date is specified, use only that folder (no fallback)
+    4. If node_filter specified, only match files containing the hostname
+    5. Per node, keep only the latest tarball (sorted by timestamp suffix)
+    6. Download to ~/downloads/<UUID>/<YYYY_MM_DD>/<filename>
+    7. Return list of local Paths to downloaded files
 """
 from __future__ import annotations
 
@@ -51,8 +52,11 @@ def _sftp_list(sftp: paramiko.SFTPClient, remote_path: str) -> list[str]:
         return []
 
 
-def _latest_date_folder(sftp: paramiko.SFTPClient, uuid: str) -> str | None:
-    """Return the latest date folder name (YYYY_MM_DD) under /fuse2/px_aid/<UUID>/."""
+def _get_date_folders_sorted(sftp: paramiko.SFTPClient, uuid: str) -> list[str]:
+    """
+    Return all date folder names (YYYY_MM_DD) under /fuse2/px_aid/<UUID>/,
+    sorted descending (most recent first).
+    """
     base = f"{FUSE_BASE}/{uuid}"
     log.info(f"Scanning for date folders under: {base}")
     entries = _sftp_list(sftp, base)
@@ -61,17 +65,65 @@ def _latest_date_folder(sftp: paramiko.SFTPClient, uuid: str) -> str | None:
             f"No entries found under {base}. "
             "Check that the cluster UUID is correct and you have access to Fuse2."
         )
-        return None
+        return []
     date_folders = sorted(
         [e for e in entries if _DATE_FOLDER_PAT.match(e)],
         reverse=True,
     )
     non_date = [e for e in entries if not _DATE_FOLDER_PAT.match(e)]
     log.info(
-        f"Found {len(date_folders)} date folder(s) under {base}: {date_folders}"
-        + (f" (ignored: {non_date})" if non_date else "")
+        f"Found {len(date_folders)} date folder(s): {date_folders}"
+        + (f" (non-date entries ignored: {non_date})" if non_date else "")
     )
-    return date_folders[0] if date_folders else None
+    return date_folders
+
+
+def _find_tarballs_in_folder(
+    sftp: paramiko.SFTPClient,
+    cluster_uuid: str,
+    date_folder: str,
+    node_filter: str | None,
+) -> tuple[str, list[str]]:
+    """
+    List auto-diag tarballs inside a single date folder.
+
+    Returns (remote_dir, tarballs) where tarballs is the filtered list.
+    Returns (remote_dir, []) if the folder is empty or has no matching tarballs.
+    """
+    remote_dir = f"{FUSE_BASE}/{cluster_uuid}/{date_folder}"
+    entries = _sftp_list(sftp, remote_dir)
+    if not entries:
+        log.warning(f"  {date_folder}: folder is empty or inaccessible")
+        return remote_dir, []
+
+    log.debug(f"  {date_folder}: {len(entries)} entries — {sorted(entries)}")
+
+    tarballs = sorted([
+        e for e in entries
+        if e.endswith(".tar.gz") and "-auto-diags-" in e
+    ])
+
+    if not tarballs:
+        log.warning(
+            f"  {date_folder}: no -auto-diags-*.tar.gz files found "
+            f"(other files present: {sorted(entries)})"
+        )
+        return remote_dir, []
+
+    if node_filter:
+        matched = [t for t in tarballs if node_filter in t]
+        if not matched:
+            log.warning(
+                f"  {date_folder}: {len(tarballs)} tarball(s) found but none match "
+                f"node filter '{node_filter}' — {tarballs}"
+            )
+            return remote_dir, []
+        tarballs = matched
+
+    log.info(
+        f"  {date_folder}: found {len(tarballs)} matching tarball(s) — {tarballs}"
+    )
+    return remote_dir, tarballs
 
 
 def download_diags(
@@ -79,81 +131,88 @@ def download_diags(
     cluster_uuid: str,
     node_filter: str | None = None,
     date_override: str | None = None,
+    max_days_back: int = 7,
 ) -> list[Path]:
     """
     Walk Fuse2 and download diagnostic tarballs for the given cluster UUID.
+
+    If the most recent date folder has no auto-diag files, automatically falls
+    back to previous days (up to max_days_back days total).
 
     Args:
         ssh_client   : Open paramiko SSHClient (from px_auth.auth_flow)
         cluster_uuid : Cluster UUID string
         node_filter  : Optional hostname to limit download to one node
-        date_override: Optional YYYY_MM_DD date folder name (default: latest)
+        date_override: Optional YYYY_MM_DD date folder to use (no fallback)
+        max_days_back: How many date folders to check before giving up (default 7)
 
     Returns:
         List of local file Paths to downloaded .tar.gz files
 
     Raises:
-        FileNotFoundError if no diag files are found
+        FileNotFoundError if no diag files are found in any checked folder
     """
     sftp = ssh_client.open_sftp()
     downloaded: list[Path] = []
 
     try:
-        # Determine date folder
-        date_folder = date_override or _latest_date_folder(sftp, cluster_uuid)
-        if not date_folder:
-            raise FileNotFoundError(
-                f"No date folders found under {FUSE_BASE}/{cluster_uuid}/"
+        # Build ordered list of date folders to try
+        if date_override:
+            # Explicit date requested — try only that folder, no fallback
+            log.info(f"Using explicit date override: {date_override}")
+            date_folders_to_try = [date_override]
+        else:
+            date_folders_to_try = _get_date_folders_sorted(sftp, cluster_uuid)
+            if not date_folders_to_try:
+                raise FileNotFoundError(
+                    f"No date folders found under {FUSE_BASE}/{cluster_uuid}/. "
+                    "Check cluster UUID and Fuse2 access."
+                )
+            # Limit search to max_days_back most-recent folders
+            date_folders_to_try = date_folders_to_try[:max_days_back]
+            log.info(
+                f"Will search up to {len(date_folders_to_try)} date folder(s) "
+                f"for auto-diag tarballs: {date_folders_to_try}"
             )
 
-        remote_dir = f"{FUSE_BASE}/{cluster_uuid}/{date_folder}"
-        log.info(f"Remote diag directory: {remote_dir}")
+        # Walk date folders newest-first until tarballs are found
+        date_folder: str | None = None
+        remote_dir: str = ""
+        tarballs: list[str] = []
 
-        entries = _sftp_list(sftp, remote_dir)
-        if not entries:
-            raise FileNotFoundError(
-                f"No files found in {remote_dir}. "
-                "Verify the cluster UUID and date folder on Fuse2."
+        for candidate in date_folders_to_try:
+            log.info(f"Checking date folder: {candidate}")
+            remote_dir, tarballs = _find_tarballs_in_folder(
+                sftp, cluster_uuid, candidate, node_filter
+            )
+            if tarballs:
+                date_folder = candidate
+                log.info(
+                    f"✓ Using date folder: {date_folder} "
+                    f"({len(tarballs)} tarball(s) found)"
+                )
+                break
+            log.warning(
+                f"  → No auto-diag files in {candidate}, "
+                "falling back to previous day..."
             )
 
-        log.info(f"All entries in {remote_dir} ({len(entries)}): {sorted(entries)}")
-
-        # Filter to auto-diag tarballs: <node>-auto-diags-<ts>.tar.gz
-        tarballs = sorted([
-            e for e in entries
-            if e.endswith(".tar.gz") and "-auto-diags-" in e
-        ])
-
-        log.info(
-            f"Auto-diag tarballs found: {len(tarballs)}"
-            + (f" — {tarballs}" if tarballs else "")
-        )
-
-        if node_filter:
-            before = tarballs
-            tarballs = [t for t in tarballs if node_filter in t]
-            log.info(f"After node filter '{node_filter}': {tarballs} (was {before})")
-
-        if not tarballs:
+        if not tarballs or not date_folder:
+            checked = ", ".join(date_folders_to_try)
             raise FileNotFoundError(
-                f"No -auto-diags- tarballs found in {remote_dir}"
+                f"No auto-diag tarballs found in any of the {len(date_folders_to_try)} "
+                f"most-recent date folder(s): [{checked}]"
                 + (f" matching node '{node_filter}'" if node_filter else "")
-                + f". All entries: {sorted(entries)}"
+                + f"\nFuse2 base: {FUSE_BASE}/{cluster_uuid}/"
             )
 
         # Group by node hostname, keep latest tarball per node
         node_tarballs: dict[str, list[str]] = defaultdict(list)
         for t in tarballs:
             parts = t.split("-auto-diags-")
-            if len(parts) == 2:
-                node_tarballs[parts[0]].append(t)
-            else:
-                node_tarballs[t].append(t)
+            node_tarballs[parts[0] if len(parts) == 2 else t].append(t)
 
-        selected: list[str] = []
-        for node_name, files in node_tarballs.items():
-            selected.append(sorted(files)[-1])  # latest by timestamp suffix
-
+        selected: list[str] = [sorted(files)[-1] for files in node_tarballs.values()]
         log.info(f"Downloading {len(selected)} tarball(s) from {remote_dir}")
 
         # Local destination
@@ -169,14 +228,13 @@ def download_diags(
                 downloaded.append(local_path)
                 continue
 
-            # Get remote file size for progress bar
             try:
                 stat = sftp.stat(remote_path)
                 file_size = stat.st_size or 0
             except Exception:
                 file_size = 0
 
-            log.info(f"Downloading: {filename}")
+            log.info(f"Downloading: {filename} ({file_size / (1024*1024):.1f} MB)")
             with tqdm(total=file_size, unit="B", unit_scale=True, desc=filename) as pbar:
                 def _progress(transferred: int, total: int, _pbar: tqdm = pbar) -> None:
                     _pbar.update(transferred - _pbar.n)
