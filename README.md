@@ -3,6 +3,10 @@
 A Python CLI tool that SSH/SFTP-connects to a Fuse2 jump host, downloads Portworx
 diagnostic tarballs, analyzes them, and maps findings to Portworx Smart Signals.
 
+Both diag-bundle kinds are pulled from Fuse2: scheduled `-auto-diags-` bundles and
+on-demand/manual `-diags-` bundles (the `<node>-diags-<YYYYMMDDHHMMSS>.tar.gz`
+files written to `/var/cores/`). The latest of each kind is kept per node.
+
 ## Requirements
 
 - Python 3.10+
@@ -135,7 +139,7 @@ deliverable for TAM meetings.
 px_diag_analyzer/
 ├── px_diag.py           # CLI entrypoint (argparse orchestrator)
 ├── px_auth.py           # purelogin + paramiko SSH to Fuse2
-├── px_download.py       # SFTP walk of /fuse2/px_aid/<UUID>/<date>/
+├── px_download.py       # SFTP walk of /fuse2/px_aid/<UUID>/<date>/ (auto + manual diags)
 ├── px_extract.py        # Tarball extraction with path normalization
 ├── px_report.py         # Renders all output files
 ├── px_jira.py           # CNBU Portworx (PWX) Jira linkage (read-only search)

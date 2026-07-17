@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,12 @@ from tqdm import tqdm
 log = logging.getLogger(__name__)
 
 LOCAL_BASE = Path.home() / "downloads"
+
+# Matches both <node>-auto-diags-<ts>.tar.gz and <node>-diags-<ts>.tar.gz
+# (kept in sync with px_download._DIAG_TARBALL_PAT).
+_DIAG_TARBALL_RE = re.compile(
+    r'^(?P<node>.+?)-(?P<kind>auto-diags|diags)-(?P<ts>\d{14})\.tar\.gz$'
+)
 
 
 def extract_all(
@@ -61,23 +68,34 @@ def _extract_one(tarball: Path, cluster_uuid: str, force: bool = False) -> Path 
     """
     Extract a single tarball. Returns the extraction directory Path, or None on skip.
 
-    Naming convention: <node>-auto-diags-<YYYYMMDDHHMMSS>.tar.gz
-    Node name is extracted from everything before '-auto-diags-'.
+    Naming conventions handled:
+        <node>-auto-diags-<YYYYMMDDHHMMSS>.tar.gz  (scheduled/automatic)
+        <node>-diags-<YYYYMMDDHHMMSS>.tar.gz       (on-demand/manual)
+
+    Node name is the portion before the '-(auto-)diags-' marker. Manual `-diags-`
+    bundles extract to a distinct '<node>-diags-<ts>' directory so they do not
+    collide with (and get skipped behind) the node's auto-diag bundle.
     """
-    # Derive node name from filename
+    # Derive node name + bundle kind from filename
     stem = tarball.name
     if stem.endswith(".tar.gz"):
         stem = stem[:-7]
 
-    parts = stem.split("-auto-diags-")
-    if len(parts) == 2:
-        node_name = parts[0]
-        ts_suffix = parts[1]
+    m = _DIAG_TARBALL_RE.match(tarball.name)
+    if m:
+        node_name = m.group("node")
+        kind      = m.group("kind")
+        ts_suffix = m.group("ts")
     else:
         node_name = stem
+        kind      = ""
         ts_suffix = ""
 
-    dest_dir      = LOCAL_BASE / cluster_uuid / node_name
+    # Keep the common auto-diag path as bare <node> (backward compatible); give
+    # manual diag bundles a distinct directory so both kinds can be analyzed.
+    dir_name = node_name if kind in ("", "auto-diags") else f"{node_name}-diags-{ts_suffix}"
+
+    dest_dir      = LOCAL_BASE / cluster_uuid / dir_name
     manifest_path = dest_dir / "manifest.json"
 
     if dest_dir.exists() and manifest_path.exists() and not force:
@@ -108,6 +126,7 @@ def _extract_one(tarball: Path, cluster_uuid: str, force: bool = False) -> Path 
     manifest = {
         "tarball": str(tarball),
         "node": node_name,
+        "kind": kind or "unknown",
         "ts_suffix": ts_suffix,
         "cluster_uuid": cluster_uuid,
         "extracted_at": datetime.now(timezone.utc).isoformat(),

@@ -3,20 +3,28 @@ px_download.py — SFTP walk of /fuse2/px_aid/<UUID>/<date>/ to download diag ta
 
 Fuse2 path format (confirmed):
     /fuse2/px_aid/<CLUSTER_UUID>/<YYYY_MM_DD>/<NODE>-auto-diags-<YYYYMMDDHHMMSS>.tar.gz
+    /fuse2/px_aid/<CLUSTER_UUID>/<YYYY_MM_DD>/<NODE>-diags-<YYYYMMDDHHMMSS>.tar.gz
     /fuse2/px_aid/<CLUSTER_UUID>/<YYYY_MM_DD>/<NODE>-px-kvdb-dump-diags-<ts>.log.gz
 
-    Example:
-    /fuse2/px_aid/b9462820-8db9-4088-9801-563dcc31d237/2026_04_10/pxpvip1331919.gsm1900.org-auto-diags-20260410052348.tar.gz
+    Examples:
+    .../2026_04_10/pxpvip1331919.gsm1900.org-auto-diags-20260410052348.tar.gz
+    .../2026_07_16/ttpvip1340205.gsm1900.org-diags-20260716175809.tar.gz
+
+    Two diag-bundle kinds are pulled:
+      * auto-diags — scheduled bundles Portworx generates automatically
+      * diags      — on-demand / manual bundles (e.g. `pxctl service diags`),
+                     the same ones written to /var/cores/ on the node
 
     Note: date folders use underscores (2026_04_10), NOT dashes.
 
 Strategy:
     1. List all date folders under /fuse2/px_aid/<UUID>/, sort descending (newest first)
-    2. Walk folders newest-first; skip any that contain no -auto-diags-*.tar.gz files
-       (auto-diag bundles are not always generated every day — fall back up to 7 days)
+    2. Walk folders newest-first; skip any that contain no diag tarballs
+       (bundles are not always generated every day — fall back up to 7 days)
     3. If --date is specified, use only that folder (no fallback)
     4. If node_filter specified, only match files containing the hostname
-    5. Per node, keep only the latest tarball (sorted by timestamp suffix)
+    5. Per (node, kind), keep only the latest tarball (sorted by timestamp suffix)
+       so a node's manual `-diags-` bundle is kept alongside its `-auto-diags-` one
     6. Download to ~/downloads/<UUID>/<YYYY_MM_DD>/<filename>
     7. Return list of local Paths to downloaded files
 """
@@ -36,6 +44,20 @@ FUSE_BASE = "/fuse2/px_aid"
 LOCAL_BASE = Path.home() / "downloads"
 
 _DATE_FOLDER_PAT = re.compile(r'^\d{4}_\d{2}_\d{2}$')
+
+# Matches both diag-bundle kinds:
+#   <node>-auto-diags-<YYYYMMDDHHMMSS>.tar.gz   (scheduled/automatic)
+#   <node>-diags-<YYYYMMDDHHMMSS>.tar.gz        (on-demand/manual, from /var/cores)
+# The <node> group is non-greedy so "auto" stays with the kind, not the hostname.
+# The .tar.gz anchor excludes the -px-kvdb-dump-diags-<ts>.log.gz sidecar files.
+_DIAG_TARBALL_PAT = re.compile(
+    r'^(?P<node>.+?)-(?P<kind>auto-diags|diags)-(?P<ts>\d{14})\.tar\.gz$'
+)
+
+
+def _match_diag_tarball(name: str):
+    """Return the regex match for a diag tarball filename, or None."""
+    return _DIAG_TARBALL_PAT.match(name)
 
 
 def _sftp_list(sftp: paramiko.SFTPClient, remote_path: str) -> list[str]:
@@ -85,7 +107,7 @@ def _find_tarballs_in_folder(
     node_filter: str | None,
 ) -> tuple[str, list[str]]:
     """
-    List auto-diag tarballs inside a single date folder.
+    List diag tarballs (both -auto-diags- and -diags-) inside a single date folder.
 
     Returns (remote_dir, tarballs) where tarballs is the filtered list.
     Returns (remote_dir, []) if the folder is empty or has no matching tarballs.
@@ -98,14 +120,11 @@ def _find_tarballs_in_folder(
 
     log.debug(f"  {date_folder}: {len(entries)} entries — {sorted(entries)}")
 
-    tarballs = sorted([
-        e for e in entries
-        if e.endswith(".tar.gz") and "-auto-diags-" in e
-    ])
+    tarballs = sorted([e for e in entries if _match_diag_tarball(e)])
 
     if not tarballs:
         log.warning(
-            f"  {date_folder}: no -auto-diags-*.tar.gz files found "
+            f"  {date_folder}: no diag tarballs (-auto-diags-/-diags-*.tar.gz) found "
             f"(other files present: {sorted(entries)})"
         )
         return remote_dir, []
@@ -172,7 +191,7 @@ def download_diags(
             date_folders_to_try = date_folders_to_try[:max_days_back]
             log.info(
                 f"Will search up to {len(date_folders_to_try)} date folder(s) "
-                f"for auto-diag tarballs: {date_folders_to_try}"
+                f"for diag tarballs: {date_folders_to_try}"
             )
 
         # Walk date folders newest-first until tarballs are found
@@ -193,27 +212,38 @@ def download_diags(
                 )
                 break
             log.warning(
-                f"  → No auto-diag files in {candidate}, "
+                f"  → No diag tarballs in {candidate}, "
                 "falling back to previous day..."
             )
 
         if not tarballs or not date_folder:
             checked = ", ".join(date_folders_to_try)
             raise FileNotFoundError(
-                f"No auto-diag tarballs found in any of the {len(date_folders_to_try)} "
-                f"most-recent date folder(s): [{checked}]"
+                f"No diag tarballs (-auto-diags-/-diags-) found in any of the "
+                f"{len(date_folders_to_try)} most-recent date folder(s): [{checked}]"
                 + (f" matching node '{node_filter}'" if node_filter else "")
                 + f"\nFuse2 base: {FUSE_BASE}/{cluster_uuid}/"
             )
 
-        # Group by node hostname, keep latest tarball per node
-        node_tarballs: dict[str, list[str]] = defaultdict(list)
+        # Group by (node hostname, kind), keep the latest tarball per group so a
+        # node's manual `-diags-` bundle is retained alongside its `-auto-diags-`
+        # one. The timestamp suffix sorts lexicographically == chronologically.
+        grouped: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
         for t in tarballs:
-            parts = t.split("-auto-diags-")
-            node_tarballs[parts[0] if len(parts) == 2 else t].append(t)
+            m = _match_diag_tarball(t)
+            if not m:
+                continue
+            key = (m.group("node"), m.group("kind"))
+            grouped[key].append((m.group("ts"), t))
 
-        selected: list[str] = [sorted(files)[-1] for files in node_tarballs.values()]
-        log.info(f"Downloading {len(selected)} tarball(s) from {remote_dir}")
+        selected: list[str] = [
+            max(items)[1] for items in grouped.values()
+        ]
+        selected.sort()
+        log.info(
+            f"Downloading {len(selected)} tarball(s) from {remote_dir} "
+            f"across {len(grouped)} (node, kind) group(s)"
+        )
 
         # Local destination
         local_dir = LOCAL_BASE / cluster_uuid / date_folder
