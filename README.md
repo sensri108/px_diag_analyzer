@@ -3,9 +3,12 @@
 A Python CLI tool that SSH/SFTP-connects to a Fuse2 jump host, downloads Portworx
 diagnostic tarballs, analyzes them, and maps findings to Portworx Smart Signals.
 
-Both diag-bundle kinds are pulled from Fuse2: scheduled `-auto-diags-` bundles and
-on-demand/manual `-diags-` bundles (the `<node>-diags-<YYYYMMDDHHMMSS>.tar.gz`
-files written to `/var/cores/`). The latest of each kind is kept per node.
+Both diag-bundle kinds are recognized on Fuse2: scheduled `-auto-diags-` bundles
+and on-demand/manual `-diags-` bundles (the `<node>-diags-<YYYYMMDDHHMMSS>.tar.gz`
+files written to `/var/cores/`). For each node the **single latest tar** is pulled
+— whichever kind is newest — and the search stops for that node once it is found
+(no fallback to older dates). Downloaded `.tar.gz` files are retained after
+extraction.
 
 ## Requirements
 

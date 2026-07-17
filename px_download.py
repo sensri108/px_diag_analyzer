@@ -10,7 +10,7 @@ Fuse2 path format (confirmed):
     .../2026_04_10/pxpvip1331919.gsm1900.org-auto-diags-20260410052348.tar.gz
     .../2026_07_16/ttpvip1340205.gsm1900.org-diags-20260716175809.tar.gz
 
-    Two diag-bundle kinds are pulled:
+    Either diag-bundle kind is accepted:
       * auto-diags — scheduled bundles Portworx generates automatically
       * diags      — on-demand / manual bundles (e.g. `pxctl service diags`),
                      the same ones written to /var/cores/ on the node
@@ -19,15 +19,16 @@ Fuse2 path format (confirmed):
 
 Strategy:
     1. List all date folders under /fuse2/px_aid/<UUID>/, sort descending (newest first)
-    2. Walk ALL folders in the window (up to 7 days) newest-first, collecting the
-       latest tarball per (node, kind). Both diag kinds must be pulled, and a
-       node's `-auto-diags-` and `-diags-` bundles can live in different date
-       folders — so we do not stop at the first folder with data.
+    2. Walk folders newest-first. For each node, take the SINGLE latest tarball —
+       newest timestamp, whichever kind — then stop looking for that node. No
+       fallback to older dates once a node's latest tar is found.
     3. If --date is specified, use only that folder (no fallback)
-    4. If node_filter specified, only match files containing the hostname
-    5. Because folders are scanned newest-first, the first occurrence of a
-       (node, kind) is that kind's latest tar; older duplicates are skipped.
+    4. If node_filter specified, only match files containing the hostname; once
+       that node's latest tar is found, the walk stops immediately.
+    5. Older folders are visited only to discover nodes missing from the newest
+       folder(s); a node already found is skipped.
     6. Download each selected bundle to ~/downloads/<UUID>/<its YYYY_MM_DD>/<filename>
+       (the .tar.gz is retained after extraction — see px_extract).
     7. Return list of local Paths to downloaded files
 """
 from __future__ import annotations
@@ -195,14 +196,14 @@ def download_diags(
                 f"for diag tarballs: {date_folders_to_try}"
             )
 
-        # Walk date folders newest-first, collecting the LATEST tarball for each
-        # (node, kind). Scanning newest-first means the first time a (node, kind)
-        # is seen it is that kind's latest bundle, so we record it and skip older
-        # duplicates. We deliberately keep scanning past the first folder that has
-        # data: a node's `-auto-diags-` and `-diags-` bundles can live in
-        # different date folders, and BOTH kinds' latest tars must be pulled.
-        #   selected[(node, kind)] = {"file", "remote_dir", "date_folder", "ts"}
-        selected: dict[tuple[str, str], dict] = {}
+        # Walk date folders newest-first. For each node, take the SINGLE latest
+        # tarball — the newest timestamp, whichever kind (`-auto-diags-` OR
+        # `-diags-`) — and then stop looking for that node. We do NOT fetch a
+        # second kind or an older-dated bundle for a node once its latest tar is
+        # found. Older folders are visited only to discover nodes that are absent
+        # from the newest folder(s); a node already found there is skipped.
+        #   selected[node] = {"file", "remote_dir", "date_folder", "ts", "kind"}
+        selected: dict[str, dict] = {}
 
         for candidate in date_folders_to_try:
             log.info(f"Checking date folder: {candidate}")
@@ -213,25 +214,38 @@ def download_diags(
                 log.info(f"  → No diag tarballs in {candidate}")
                 continue
 
-            new_here = 0
+            # Pick the newest tar per not-yet-found node within this folder.
+            newest_here: dict[str, dict] = {}
             for t in tarballs:
                 m = _match_diag_tarball(t)
                 if not m:
                     continue
-                key = (m.group("node"), m.group("kind"))
-                if key in selected:
-                    continue  # already recorded this kind's latest (newest-first)
-                selected[key] = {
-                    "file": t,
-                    "remote_dir": remote_dir,
-                    "date_folder": candidate,
-                    "ts": m.group("ts"),
-                }
-                new_here += 1
-            log.info(
-                f"  {candidate}: recorded {new_here} new (node, kind) bundle(s); "
-                f"kinds so far: {sorted({k for _, k in selected})}"
-            )
+                node = m.group("node")
+                if node in selected:
+                    continue  # already have this node's latest from a newer folder
+                ts = m.group("ts")
+                cur = newest_here.get(node)
+                if cur is None or ts > cur["ts"]:
+                    newest_here[node] = {
+                        "file": t,
+                        "remote_dir": remote_dir,
+                        "date_folder": candidate,
+                        "ts": ts,
+                        "kind": m.group("kind"),
+                    }
+
+            for node, entry in newest_here.items():
+                selected[node] = entry
+                log.info(
+                    f"  {candidate}: {node} → latest tar {entry['file']} "
+                    f"(kind={entry['kind']})"
+                )
+
+            # With an explicit --node filter there is exactly one node of
+            # interest; once its latest tar is found, stop the walk entirely.
+            if node_filter and selected:
+                log.info("  ✓ Latest tar for the requested node found; stopping walk.")
+                break
 
         if not selected:
             checked = ", ".join(date_folders_to_try)
@@ -242,17 +256,11 @@ def download_diags(
                 + f"\nFuse2 base: {FUSE_BASE}/{cluster_uuid}/"
             )
 
-        kinds_found = sorted({k for _, k in selected})
         n_folders = len({e["date_folder"] for e in selected.values()})
         log.info(
-            f"Downloading {len(selected)} tarball(s) across {n_folders} date "
-            f"folder(s); kinds: {kinds_found}"
+            f"Downloading {len(selected)} tarball(s) (latest tar per node) "
+            f"across {n_folders} date folder(s)"
         )
-        if len(kinds_found) < 2:
-            log.warning(
-                f"Only one diag kind present in the searched window ({kinds_found}); "
-                "the other kind was not found."
-            )
 
         # Download each selected bundle from its own source folder.
         for entry in sorted(selected.values(), key=lambda e: (e["date_folder"], e["file"])):

@@ -134,6 +134,9 @@ def _extract_one(tarball: Path, cluster_uuid: str, force: bool = False) -> Path 
     }
     manifest_path.write_text(json.dumps(manifest, indent=2))
     log.info(f"Extracted to: {dest_dir}")
+    # The source tarball is intentionally kept (never deleted) so the original
+    # bundle remains available alongside the extracted contents for analysis.
+    log.info(f"Source tarball retained: {tarball}")
     return dest_dir
 
 
