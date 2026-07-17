@@ -42,9 +42,63 @@ python px_diag.py --cluster-uuid <UUID> --date 2026_04_10
 # Re-extract tarballs even if already extracted
 python px_diag.py --cluster-uuid <UUID> --local-path ~/downloads/<UUID>/ --force-extract
 
+# Link findings to the CNBU Portworx (PWX) Jira project — dry-run (deep links only)
+python px_diag.py --cluster-uuid <UUID> --jira
+
+# Live read-only Jira search (resolves matching PWX issues)
+export JIRA_EMAIL=you@purestorage.com
+export JIRA_API_TOKEN=<atlassian-api-token>
+python px_diag.py --cluster-uuid <UUID> --jira-live
+
 # Enable verbose/debug logging
 python px_diag.py --cluster-uuid <UUID> --verbose
 ```
+
+## Troubleshooting Docs Coverage
+
+The analyzer also matches diag logs against the documented common errors and
+troubleshooting tips from the [Portworx Enterprise troubleshooting guide](https://docs.portworx.com/portworx-enterprise/operations/troubleshooting).
+These surface as `TS-*` findings, each carrying the documented **symptom**,
+**cause**, **diagnostic commands**, **resolution steps**, and a link back to the
+source doc. Most are not covered by a deployed Smart Signal, so they show up in
+the same "dark to Pure" gap analysis as the `LOCAL-*` patterns.
+
+| ID | Documented Error | Doc Section |
+|----|------------------|-------------|
+| `TS-01` | portworx-service nodePort/ClusterIP conflict | common-errors |
+| `TS-02` | DNS resolution failure (NetworkManager rewrite) | common-errors |
+| `TS-03` | SELinux/Docker keycreate failure (moby#39109) | common-errors |
+| `TS-04` | OCI-Monitor runtime socket not mounted | common-errors |
+| `TS-05` | IBM OpenShift PVC provisioning timeout | common-errors |
+| `TS-06` | Dynatrace holds handles → "device exists" | common-errors |
+| `TS-07` | runc "container with given ID already exists" | common-errors |
+| `TS-08` | same drive in multiple storage pools | common-errors |
+| `TS-09` | vSphere CSI failed to bind PVC to PV | troubleshoot |
+
+## Jira Integration (CNBU Portworx)
+
+`px_jira.py` links each finding to related issues in the CNBU **PWX**
+(*Portworx Engineering*) Jira project. It is **read-only** — it searches, it
+never creates or edits issues.
+
+- `--jira` (dry-run, default): computes a per-finding JQL query from the
+  finding's `jira_keywords` and emits a browsable Jira search deep link. No
+  network calls, no credentials required.
+- `--jira-live`: performs the read-only search against the Jira Cloud REST API
+  and attaches matching issue keys, summaries, and status to each finding.
+
+Configuration via environment variables:
+
+| Variable | Default | Used by |
+|----------|---------|---------|
+| `JIRA_BASE_URL` | `https://purestorage-cnbu-sandbox.atlassian.net` | both |
+| `JIRA_PROJECT` | `PWX` | both |
+| `JIRA_EMAIL` | — | `--jira-live` |
+| `JIRA_API_TOKEN` | — | `--jira-live` |
+
+Linked tickets appear in `full_report.txt` (§10), `cluster_summary.md`
+(Related Jira Tickets), `remediation_steps.md` (per finding), and `errors.json`
+(`jira_project` / `jira_query` / `jira_search_url` / `jira_tickets`).
 
 ## Output
 
@@ -83,7 +137,8 @@ px_diag_analyzer/
 ├── px_auth.py           # purelogin + paramiko SSH to Fuse2
 ├── px_download.py       # SFTP walk of /fuse2/px_aid/<UUID>/<date>/
 ├── px_extract.py        # Tarball extraction with path normalization
-├── px_report.py         # Renders all three output files
+├── px_report.py         # Renders all output files
+├── px_jira.py           # CNBU Portworx (PWX) Jira linkage (read-only search)
 ├── px_analyzer/
 │   ├── __init__.py
 │   ├── engine.py        # Orchestrator + Finding dataclass + correlation
@@ -97,9 +152,11 @@ px_diag_analyzer/
 │   ├── network.py       # SS-22 (NFS dependency)
 │   ├── security.py      # SS-09 (in-tree volumes + K8s version)
 │   ├── infrastructure.py # SS-07 (stale mount), LOCAL-03 (device-mapper)
+│   ├── troubleshooting.py # TS-* (Portworx troubleshooting docs)
 │   └── predictive.py    # Sliding-window trend analysis (FORECAST-* findings)
 ├── patterns/
 │   ├── errors.yaml      # 31 Smart Signal patterns + 4 LOCAL patterns
+│   ├── troubleshooting.yaml # 9 doc-derived troubleshooting patterns (TS-*)
 │   └── forecasts.yaml   # Predictive threshold rules
 └── requirements.txt
 ```

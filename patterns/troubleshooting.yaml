@@ -1,0 +1,210 @@
+# ============================================================
+# TROUBLESHOOTING SIGNALS — derived from the Portworx Enterprise
+# troubleshooting documentation:
+#   https://docs.portworx.com/portworx-enterprise/operations/troubleshooting
+#
+# These patterns capture the documented "common errors" and troubleshooting
+# tips. Most are NOT covered by a deployed Smart Signal (already_monitored:
+# false), so they surface as "dark" findings — the same leverage the LOCAL-*
+# patterns provide. Each entry carries the documented symptom, cause,
+# diagnostic commands, and resolution steps straight from the docs, plus
+# jira_keywords used by px_jira.py to find related PWX tickets.
+# ============================================================
+
+- id: TS-01
+  smart_signal: null
+  category: troubleshooting
+  severity: WARNING
+  already_monitored: false
+  dark_note: "Documented install error (ClusterIP/nodePort) — not covered by a Smart Signal."
+  source_files:
+    - misc/px-status.out
+    - var/lib/osd/log/*.log*
+    - var/cores/px_status/*.log*
+  pattern: "may not be used when type is .?ClusterIP|nodePort: Forbidden|spec\\.ports\\[\\d+\\]\\.nodePort"
+  symptom: "Service 'portworx-service' is invalid: spec.ports[0].nodePort: Forbidden: may not be used when type is 'ClusterIP'"
+  cause: "Older Portworx manifests carry an incompatible service configuration when a newer spec is applied."
+  diagnostic:
+    - "kubectl get service portworx-service -n <px-namespace>"
+  docs_url: "https://docs.portworx.com/portworx-enterprise/operations/troubleshooting/common-errors"
+  jira_keywords: ["portworx-service", "nodePort", "ClusterIP", "apply spec"]
+  remediation_steps:
+    - "kubectl edit service portworx-service -n <px-namespace>"
+    - "Change service type to ClusterIP and remove nodePort entries from the spec"
+    - "Repeat for the portworx-api service"
+    - "Reapply the manifests"
+
+- id: TS-02
+  smart_signal: null
+  category: troubleshooting
+  severity: CRITICAL
+  already_monitored: false
+  dark_note: "DNS resolution failure via NetworkManager rewrite — documented, not covered by a Smart Signal."
+  source_files:
+    - var/lib/osd/log/*.log*
+    - var/cores/px_status/*.log*
+    - misc/px-status.out
+  pattern: "error in obtaining etcd version|no route to host|lookup .* on .*:53"
+  symptom: "error in obtaining etcd version: dial tcp: lookup _some_host on [::1]:53: no route to host"
+  cause: "NetworkManager updates /etc/resolv.conf after the Portworx container starts, breaking DNS resolution for KVDB and CloudSnap."
+  diagnostic:
+    - "systemctl status NetworkManager"
+    - "cat /etc/resolv.conf"
+  docs_url: "https://docs.portworx.com/portworx-enterprise/operations/troubleshooting/common-errors"
+  jira_keywords: ["DNS resolution", "NetworkManager", "resolv.conf", "etcd version"]
+  remediation_steps:
+    - "systemctl stop NetworkManager"
+    - "systemctl disable NetworkManager"
+    - "Restart Portworx and confirm KVDB/CloudSnap DNS resolution succeeds"
+
+- id: TS-03
+  smart_signal: null
+  category: troubleshooting
+  severity: CRITICAL
+  already_monitored: false
+  dark_note: "SELinux/Docker keycreate failure (moby#39109) — documented, not covered by a Smart Signal."
+  source_files:
+    - var/lib/osd/log/*.log*
+    - misc/dmesg.out
+    - misc/px-status.out
+  pattern: "write /proc/self/attr/keycreate: permission denied|OCI runtime create failed"
+  symptom: "OCI runtime create failed: write /proc/self/attr/keycreate: permission denied"
+  cause: "Docker issue on SELinux-enabled systems (moby#39109) blocks container initialization."
+  diagnostic:
+    - "getenforce"
+    - "journalctl -u docker --since '1 hour ago'"
+  docs_url: "https://docs.portworx.com/portworx-enterprise/operations/troubleshooting/common-errors"
+  jira_keywords: ["SELinux", "keycreate", "OCI runtime create failed", "moby"]
+  remediation_steps:
+    - "Disable SELinux, OR"
+    - "Use the Docker package provided by your platform vendor"
+
+- id: TS-04
+  smart_signal: null
+  category: troubleshooting
+  severity: WARNING
+  already_monitored: false
+  dark_note: "OCI-Monitor cannot access container runtime socket — documented install failure."
+  source_files:
+    - var/lib/osd/log/*.log*
+    - misc/px-status.out
+  pattern: "docker\\.sock.*containerd\\.sock.*crio\\.sock|are mounted"
+  symptom: "'/var/run/docker.sock', '/run/containerd/containerd.sock' or '/var/run/crio/crio.sock' are mounted"
+  cause: "The OCI-Monitor DaemonSet cannot reach the container runtime socket needed to deploy and validate Portworx."
+  diagnostic:
+    - "kubectl -n <px-namespace> describe ds portworx-api"
+    - "Inspect the StorageCluster/Operator spec for runtime socket volume mounts"
+  docs_url: "https://docs.portworx.com/portworx-enterprise/operations/troubleshooting/common-errors"
+  jira_keywords: ["OCI-Monitor", "containerd.sock", "crio.sock", "socket mount"]
+  remediation_steps:
+    - "Inspect the Portworx Operator spec"
+    - "Ensure the appropriate runtime socket files/directories are mounted as volumes"
+    - "Regenerate the YAML via the Portworx Central spec generator"
+
+- id: TS-05
+  smart_signal: null
+  category: troubleshooting
+  severity: WARNING
+  already_monitored: false
+  dark_note: "IBM OpenShift PVC provisioning timeout — missing PVC controller; documented."
+  source_files:
+    - var/lib/osd/log/*.log*
+    - misc/px-status.out
+  pattern: "Failed to provision volume with StorageClass.*(i/o timeout|dial tcp)"
+  symptom: "Failed to provision volume with StorageClass 'px-db': dial tcp 172.21.215.48:9001: i/o timeout"
+  cause: "The PVC controller is missing from the StorageCluster configuration (common on IBM OpenShift)."
+  diagnostic:
+    - "kubectl get pvc -n <px-namespace>"
+    - "kubectl -n <px-namespace> get stc -o yaml | grep pvc-controller"
+  docs_url: "https://docs.portworx.com/portworx-enterprise/operations/troubleshooting/common-errors"
+  jira_keywords: ["pvc-controller", "provision volume", "i/o timeout", "IBM OpenShift"]
+  remediation_steps:
+    - "Add the annotation portworx.io/pvc-controller: \"true\" to the StorageCluster"
+
+- id: TS-06
+  smart_signal: volume_device_exist
+  category: troubleshooting
+  severity: WARNING
+  already_monitored: false
+  dark_note: "Dynatrace OneAgent holds handles on /var/lib/osd/pxns, blocking detach — documented."
+  source_files:
+    - misc/px-alerts-show.out
+    - var/cores/.alerts/alerts.log
+    - var/lib/osd/log/*.log*
+  pattern: "Cannot attach volume.*device exists|failed to attach volume"
+  symptom: "failed to attach volume: Cannot attach volume <volume-id>, device exists"
+  cause: "Dynatrace OneAgent holds file handles on the Portworx internal path /var/lib/osd/pxns, preventing volume detach."
+  diagnostic:
+    - "lsof /var/lib/osd/pxns"
+    - "pxctl volume list"
+  docs_url: "https://docs.portworx.com/portworx-enterprise/operations/troubleshooting/common-errors"
+  jira_keywords: ["Dynatrace", "device exists", "attach volume", "pxns"]
+  remediation_steps:
+    - "Create Dynatrace disk exclusion rules for mount point /var/lib/osd/pxns/*"
+    - "Exclude disk paths /dev/pxd/pxd* and /dev/mapper/pxd-enc*"
+    - "Set the excluded filesystem type to '*'"
+
+- id: TS-07
+  smart_signal: null
+  category: troubleshooting
+  severity: WARNING
+  already_monitored: false
+  dark_note: "runc container-ID conflict during upgrade — documented, resolved by node reboot."
+  source_files:
+    - var/lib/osd/log/*.log*
+    - misc/dmesg.out
+    - misc/px-status.out
+  pattern: "runc run failed: container with given ID already exists|container with given ID already exists"
+  symptom: "runc run failed: container with given ID already exists"
+  cause: "Container state conflict during the upgrade process."
+  diagnostic:
+    - "journalctl -u portworx --since '1 hour ago'"
+  docs_url: "https://docs.portworx.com/portworx-enterprise/operations/troubleshooting/common-errors"
+  jira_keywords: ["runc", "container with given ID already exists", "upgrade failure"]
+  remediation_steps:
+    - "Reboot the affected node to clear the stale container state"
+
+- id: TS-08
+  smart_signal: null
+  category: troubleshooting
+  severity: WARNING
+  already_monitored: false
+  dark_note: "Same drive claimed by two storage pools after offline drive reconnects — documented."
+  source_files:
+    - misc/px-status.out
+    - var/lib/osd/log/*.log*
+  pattern: "same drive.*(pool|multiple)|drive.*already.*pool|pool.*offline.*drive"
+  symptom: "An offline drive reconnects and appears in two pools; one pool is marked offline."
+  cause: "Drive naming/ordering changes when a previously offline drive reconnects."
+  diagnostic:
+    - "pxctl service pool show"
+    - "pxctl status"
+  docs_url: "https://docs.portworx.com/portworx-enterprise/operations/troubleshooting/common-errors"
+  jira_keywords: ["storage pool", "drive", "pool offline", "same drive"]
+  remediation_steps:
+    - "Verify all node drives are online"
+    - "Perform a maintenance cycle to refresh drive names"
+
+- id: TS-09
+  smart_signal: null
+  category: troubleshooting
+  severity: WARNING
+  already_monitored: false
+  dark_note: "vSphere CSI driver failed to bind PVC to PV — documented troubleshooting tip."
+  source_files:
+    - var/lib/osd/log/*.log*
+    - misc/px-status.out
+  pattern: "Could not init boot manager|failed to get bound to a PV"
+  symptom: "PVC stuck 'pending'; logs show 'Could not init boot manager' with 'failed to get bound to a PV'."
+  cause: "The vSphere CSI driver is missing, or the StorageClass does not use it as its provisioner."
+  diagnostic:
+    - "kubectl get csidriver"
+    - "kubectl get pods --all-namespaces | grep vsphere-csi-controller"
+    - "kubectl logs --since=0 -n <px-namespace> -l name=portworx"
+  docs_url: "https://docs.portworx.com/portworx-enterprise/operations/troubleshooting/troubleshoot"
+  jira_keywords: ["vSphere CSI", "boot manager", "bound to a PV", "csidriver"]
+  remediation_steps:
+    - "Verify the vSphere CSI driver is installed in the cluster"
+    - "If missing, have the cluster administrator install it"
+    - "If present, confirm the StorageClass uses the CSI driver as its provisioner"
+    - "Collect Portworx pod and CSI controller logs for further analysis"

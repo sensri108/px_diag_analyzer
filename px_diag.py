@@ -95,6 +95,23 @@ Examples:
         help="Override output directory for reports (default: ~/downloads/<UUID>/reports/<ts>/)",
     )
     parser.add_argument(
+        "--jira",
+        action="store_true",
+        help="Link findings to the CNBU Portworx (PWX) Jira project. Dry-run by "
+             "default: computes the JQL + deep link per finding (no API calls).",
+    )
+    parser.add_argument(
+        "--jira-live",
+        action="store_true",
+        help="Perform live read-only Jira searches (implies --jira). Requires "
+             "JIRA_EMAIL and JIRA_API_TOKEN in the environment.",
+    )
+    parser.add_argument(
+        "--jira-project",
+        metavar="KEY",
+        help="Jira project key to search (default: PWX, or $JIRA_PROJECT).",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable debug logging",
@@ -392,6 +409,18 @@ def main() -> int:
 
     # Re-sort merged findings
     all_findings.sort(key=lambda f: (SEVERITY_RANK.get(f.severity, 99), -f.count))
+
+    # ── link findings to CNBU Portworx (PWX) Jira ───────────────────────────
+    if args.jira or args.jira_live:
+        import px_jira
+        try:
+            px_jira.enrich_findings(
+                all_findings,
+                live=args.jira_live,
+                project=args.jira_project,
+            )
+        except Exception as e:
+            log.warning(f"Jira enrichment failed: {e}", exc_info=True)
 
     # ── collect cluster info ────────────────────────────────────────────────
     cluster_info = _collect_cluster_info(extracted_paths)
