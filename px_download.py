@@ -19,20 +19,21 @@ Fuse2 path format (confirmed):
 
 Strategy:
     1. List all date folders under /fuse2/px_aid/<UUID>/, sort descending (newest first)
-    2. Walk folders newest-first; skip any that contain no diag tarballs
-       (bundles are not always generated every day — fall back up to 7 days)
+    2. Walk ALL folders in the window (up to 7 days) newest-first, collecting the
+       latest tarball per (node, kind). Both diag kinds must be pulled, and a
+       node's `-auto-diags-` and `-diags-` bundles can live in different date
+       folders — so we do not stop at the first folder with data.
     3. If --date is specified, use only that folder (no fallback)
     4. If node_filter specified, only match files containing the hostname
-    5. Per (node, kind), keep only the latest tarball (sorted by timestamp suffix)
-       so a node's manual `-diags-` bundle is kept alongside its `-auto-diags-` one
-    6. Download to ~/downloads/<UUID>/<YYYY_MM_DD>/<filename>
+    5. Because folders are scanned newest-first, the first occurrence of a
+       (node, kind) is that kind's latest tar; older duplicates are skipped.
+    6. Download each selected bundle to ~/downloads/<UUID>/<its YYYY_MM_DD>/<filename>
     7. Return list of local Paths to downloaded files
 """
 from __future__ import annotations
 
 import logging
 import re
-from collections import defaultdict
 from pathlib import Path
 
 import paramiko
@@ -194,29 +195,45 @@ def download_diags(
                 f"for diag tarballs: {date_folders_to_try}"
             )
 
-        # Walk date folders newest-first until tarballs are found
-        date_folder: str | None = None
-        remote_dir: str = ""
-        tarballs: list[str] = []
+        # Walk date folders newest-first, collecting the LATEST tarball for each
+        # (node, kind). Scanning newest-first means the first time a (node, kind)
+        # is seen it is that kind's latest bundle, so we record it and skip older
+        # duplicates. We deliberately keep scanning past the first folder that has
+        # data: a node's `-auto-diags-` and `-diags-` bundles can live in
+        # different date folders, and BOTH kinds' latest tars must be pulled.
+        #   selected[(node, kind)] = {"file", "remote_dir", "date_folder", "ts"}
+        selected: dict[tuple[str, str], dict] = {}
 
         for candidate in date_folders_to_try:
             log.info(f"Checking date folder: {candidate}")
             remote_dir, tarballs = _find_tarballs_in_folder(
                 sftp, cluster_uuid, candidate, node_filter
             )
-            if tarballs:
-                date_folder = candidate
-                log.info(
-                    f"✓ Using date folder: {date_folder} "
-                    f"({len(tarballs)} tarball(s) found)"
-                )
-                break
-            log.warning(
-                f"  → No diag tarballs in {candidate}, "
-                "falling back to previous day..."
+            if not tarballs:
+                log.info(f"  → No diag tarballs in {candidate}")
+                continue
+
+            new_here = 0
+            for t in tarballs:
+                m = _match_diag_tarball(t)
+                if not m:
+                    continue
+                key = (m.group("node"), m.group("kind"))
+                if key in selected:
+                    continue  # already recorded this kind's latest (newest-first)
+                selected[key] = {
+                    "file": t,
+                    "remote_dir": remote_dir,
+                    "date_folder": candidate,
+                    "ts": m.group("ts"),
+                }
+                new_here += 1
+            log.info(
+                f"  {candidate}: recorded {new_here} new (node, kind) bundle(s); "
+                f"kinds so far: {sorted({k for _, k in selected})}"
             )
 
-        if not tarballs or not date_folder:
+        if not selected:
             checked = ", ".join(date_folders_to_try)
             raise FileNotFoundError(
                 f"No diag tarballs (-auto-diags-/-diags-) found in any of the "
@@ -225,31 +242,24 @@ def download_diags(
                 + f"\nFuse2 base: {FUSE_BASE}/{cluster_uuid}/"
             )
 
-        # Group by (node hostname, kind), keep the latest tarball per group so a
-        # node's manual `-diags-` bundle is retained alongside its `-auto-diags-`
-        # one. The timestamp suffix sorts lexicographically == chronologically.
-        grouped: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
-        for t in tarballs:
-            m = _match_diag_tarball(t)
-            if not m:
-                continue
-            key = (m.group("node"), m.group("kind"))
-            grouped[key].append((m.group("ts"), t))
-
-        selected: list[str] = [
-            max(items)[1] for items in grouped.values()
-        ]
-        selected.sort()
+        kinds_found = sorted({k for _, k in selected})
+        n_folders = len({e["date_folder"] for e in selected.values()})
         log.info(
-            f"Downloading {len(selected)} tarball(s) from {remote_dir} "
-            f"across {len(grouped)} (node, kind) group(s)"
+            f"Downloading {len(selected)} tarball(s) across {n_folders} date "
+            f"folder(s); kinds: {kinds_found}"
         )
+        if len(kinds_found) < 2:
+            log.warning(
+                f"Only one diag kind present in the searched window ({kinds_found}); "
+                "the other kind was not found."
+            )
 
-        # Local destination
-        local_dir = LOCAL_BASE / cluster_uuid / date_folder
-        local_dir.mkdir(parents=True, exist_ok=True)
-
-        for filename in selected:
+        # Download each selected bundle from its own source folder.
+        for entry in sorted(selected.values(), key=lambda e: (e["date_folder"], e["file"])):
+            filename    = entry["file"]
+            remote_dir  = entry["remote_dir"]
+            local_dir   = LOCAL_BASE / cluster_uuid / entry["date_folder"]
+            local_dir.mkdir(parents=True, exist_ok=True)
             remote_path = f"{remote_dir}/{filename}"
             local_path  = local_dir / filename
 
