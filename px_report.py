@@ -262,6 +262,45 @@ def _write_full_report(
     else:
         lines.append("  None triggered.")
 
+    # ── 9. Troubleshooting doc matches (docs.portworx.com) ────────────────────
+    section("9. TROUBLESHOOTING (PORTWORX DOCS)")
+    ts_findings = [f for f in findings if f.id.startswith("TS-")]
+    if ts_findings:
+        for f in ts_findings:
+            lines += [
+                f"  [{f.severity}] {f.id}  ({f.count} match(es))",
+                f"    Symptom    : {(f.symptom or '')[:150]}",
+                f"    Cause      : {(f.cause or '')[:150]}",
+                f"    Docs       : {f.docs_url or 'N/A'}",
+            ]
+            if f.diagnostic:
+                lines.append(f"    Diagnostic : {f.diagnostic[0]}")
+            lines.append("")
+    else:
+        lines.append("  No documented troubleshooting patterns matched this diag.")
+
+    # ── 10. Related CNBU Portworx (PWX) Jira tickets ──────────────────────────
+    linked = [f for f in findings if getattr(f, "jira_project", None)]
+    if linked:
+        project = linked[0].jira_project
+        section(f"10. RELATED JIRA TICKETS ({project})")
+        any_live = False
+        for f in linked:
+            tickets = getattr(f, "jira_tickets", None) or []
+            if tickets:
+                any_live = True
+                lines.append(f"  {f.id}:")
+                for t in tickets:
+                    lines.append(f"    {t['key']:<12} [{t.get('status', '')}] {t.get('summary', '')[:80]}")
+            elif getattr(f, "jira_search_url", None):
+                lines.append(f"  {f.id}: {f.jira_search_url}")
+        if not any_live:
+            lines += [
+                "",
+                "  (dry-run — showing JQL search links; run with --jira-live and",
+                "   JIRA_EMAIL / JIRA_API_TOKEN set to resolve matching issues.)",
+            ]
+
     lines += ["", SEP, "  END OF REPORT", SEP]
     path.write_text("\n".join(lines), encoding="utf-8")
     log.info(f"Wrote: {path}")
@@ -321,6 +360,23 @@ def _extract_alert_summary(findings: list[Finding]) -> dict[str, dict]:
 
 def _sev_str(severity: str) -> str:
     return {"CRITICAL": "ALARM", "WARNING": "WARNING", "INFO": "INFO"}.get(severity, severity)
+
+
+def _append_jira_block(lines: list, f: Finding) -> None:
+    """Append PWX Jira linkage (Markdown) for a finding, if enrichment ran."""
+    project = getattr(f, "jira_project", None)
+    if not project:
+        return
+    tickets = getattr(f, "jira_tickets", None) or []
+    if tickets:
+        lines.append(f"**Related {project} Jira issues:**")
+        for t in tickets:
+            status = f" _({t['status']})_" if t.get("status") else ""
+            lines.append(f"- [{t['key']}]({t['url']}) — {t.get('summary', '')}{status}")
+        lines.append("")
+    elif getattr(f, "jira_search_url", None):
+        # Dry-run (or a live search with no matches): link the JQL search instead.
+        lines += [f"**Search {project} Jira:** [{f.jira_query}]({f.jira_search_url})", ""]
 
 
 def _get_volume_full_messages(findings: list[Finding]) -> list[str]:
@@ -658,6 +714,46 @@ def _write_cluster_summary(
         ss  = f.smart_signal or "—"
         lines.append(f"| {f.id} | {f.severity} | {f.category} | {f.count} | {ss} | {mon} | {f.first_seen} |")
 
+    # Troubleshooting-doc findings (TS-*) sourced from docs.portworx.com
+    ts_findings = [f for f in findings if f.id.startswith("TS-")]
+    if ts_findings:
+        lines += [
+            "",
+            "## Troubleshooting (Portworx Docs)",
+            "",
+            "Findings matched against the Portworx Enterprise troubleshooting guide.",
+            "",
+            "| ID | Severity | Symptom | Doc |",
+            "|----|----------|---------|-----|",
+        ]
+        for f in ts_findings:
+            sym = (f.symptom or "")[:90].replace("|", "\\|")
+            doc = f"[docs]({f.docs_url})" if f.docs_url else "—"
+            lines.append(f"| {f.id} | {f.severity} | {sym} | {doc} |")
+
+    # Related CNBU Portworx (PWX) Jira linkage, if enrichment ran
+    linked = [f for f in findings if getattr(f, "jira_project", None)]
+    if linked:
+        project = linked[0].jira_project
+        lines += [
+            "",
+            f"## Related Jira Tickets ({project})",
+            "",
+            f"Findings linked to the CNBU Portworx **{project}** project.",
+            "",
+            "| Finding | Related Issues |",
+            "|---------|----------------|",
+        ]
+        for f in linked:
+            tickets = getattr(f, "jira_tickets", None) or []
+            if tickets:
+                cell = ", ".join(f"[{t['key']}]({t['url']})" for t in tickets)
+            elif getattr(f, "jira_search_url", None):
+                cell = f"[search {project}]({f.jira_search_url})"
+            else:
+                cell = "—"
+            lines.append(f"| {f.id} | {cell} |")
+
     path.write_text("\n".join(lines), encoding="utf-8")
     log.info(f"Wrote: {path}")
 
@@ -700,13 +796,25 @@ def _write_remediation_steps(path: Path, findings: list[Finding]) -> None:
         ]
         if f.dark_note:
             lines += [f"> **Gap Note:** {f.dark_note}", ""]
+        if getattr(f, "symptom", None):
+            lines += [f"**Symptom:** {f.symptom}", ""]
+        if getattr(f, "cause", None):
+            lines += [f"**Cause:** {f.cause}", ""]
         if f.remediation_kb:
             lines += [f"**KB Article:** {f.remediation_kb}", ""]
+        if getattr(f, "docs_url", None):
+            lines += [f"**Portworx Docs:** {f.docs_url}", ""]
+        if getattr(f, "diagnostic", None):
+            lines.append("**Diagnostics:**")
+            for cmd in f.diagnostic:
+                lines.append(f"- `{cmd}`")
+            lines.append("")
         if f.remediation_steps:
             lines.append("**Steps:**")
             for step in f.remediation_steps:
                 lines.append(f"1. {step}")
             lines.append("")
+        _append_jira_block(lines, f)
         lines += ["---", ""]
 
     path.write_text("\n".join(lines), encoding="utf-8")

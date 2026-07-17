@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 SEVERITY_RANK = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
 
 PATTERNS_FILE = Path(__file__).parent.parent / "patterns" / "errors.yaml"
+TROUBLESHOOTING_FILE = Path(__file__).parent.parent / "patterns" / "troubleshooting.yaml"
 
 
 @dataclass
@@ -39,6 +40,17 @@ class Finding:
     dark_note: Optional[str] = None
     remediation_kb: Optional[str] = None
     remediation_steps: list = field(default_factory=list)
+    # Troubleshooting-doc enrichment (sourced from docs.portworx.com)
+    docs_url: Optional[str] = None
+    symptom: Optional[str] = None
+    cause: Optional[str] = None
+    diagnostic: list = field(default_factory=list)
+    # Jira / CNBU PWX linkage
+    jira_project: Optional[str] = None
+    jira_keywords: list = field(default_factory=list)
+    jira_query: Optional[str] = None
+    jira_search_url: Optional[str] = None
+    jira_tickets: list = field(default_factory=list)
     correlated_with: list = field(default_factory=list)
     extra: dict = field(default_factory=dict)
 
@@ -49,6 +61,19 @@ class Finding:
 def load_patterns() -> list[dict]:
     """Load patterns/errors.yaml. Returns list of pattern dicts."""
     with open(PATTERNS_FILE, encoding="utf-8") as f:
+        return yaml.safe_load(f) or []
+
+
+def load_troubleshooting() -> list[dict]:
+    """
+    Load patterns/troubleshooting.yaml — signals derived from the Portworx
+    troubleshooting documentation (docs.portworx.com/.../troubleshooting).
+    Returns [] if the file is missing so the tool degrades gracefully.
+    """
+    if not TROUBLESHOOTING_FILE.exists():
+        log.debug("No troubleshooting.yaml found; skipping doc-derived signals.")
+        return []
+    with open(TROUBLESHOOTING_FILE, encoding="utf-8") as f:
         return yaml.safe_load(f) or []
 
 
@@ -84,6 +109,11 @@ def make_finding(
         dark_note=pattern_def.get("dark_note"),
         remediation_kb=pattern_def.get("remediation_kb"),
         remediation_steps=pattern_def.get("remediation_steps", []),
+        docs_url=pattern_def.get("docs_url"),
+        symptom=pattern_def.get("symptom"),
+        cause=pattern_def.get("cause"),
+        diagnostic=pattern_def.get("diagnostic", []),
+        jira_keywords=pattern_def.get("jira_keywords", []),
         extra=extra or {},
     )
 
@@ -92,6 +122,8 @@ def _infer_category(p: dict) -> str:
     """Infer a category string from the pattern ID."""
     pid = p.get("id", "")
     sm = p.get("smart_signal", "") or ""
+    if pid.startswith("TS-") or p.get("category") == "troubleshooting":
+        return "troubleshooting"
     if "volume" in sm or pid in ("SS-01", "SS-02", "SS-03", "SS-04", "SS-05",
                                   "SS-06", "SS-08", "SS-10", "SS-11"):
         return "volume"
@@ -139,6 +171,12 @@ def run_analysis(extracted_path: Path, cluster_uuid: str) -> list[Finding]:
     patterns = load_patterns()
     pattern_map = {p["id"]: p for p in patterns}
 
+    # Merge doc-derived troubleshooting signals (TS-*) so make_finding() and the
+    # troubleshooting analyzer can resolve them by id alongside the Smart Signals.
+    ts_patterns = load_troubleshooting()
+    for p in ts_patterns:
+        pattern_map[p["id"]] = p
+
     # Resolve the actual diag content root.
     # Tarballs extract to <node>/var/lib/osd/diagfiles/pwx_diag_<id>/misc/...
     # After hostname stripping, files land under pwx_diag_<id>/ not the top level.
@@ -154,6 +192,7 @@ def run_analysis(extracted_path: Path, cluster_uuid: str) -> list[Finding]:
     from px_analyzer import (
         volume, kvdb, storage, node, capacity,
         license as lic, network, security, infrastructure, predictive,
+        troubleshooting,
     )
 
     analyzers = [
@@ -166,6 +205,7 @@ def run_analysis(extracted_path: Path, cluster_uuid: str) -> list[Finding]:
         network.analyze,
         security.analyze,
         infrastructure.analyze,
+        troubleshooting.analyze,
     ]
 
     all_findings: list[Finding] = []
