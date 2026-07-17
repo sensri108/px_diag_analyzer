@@ -109,9 +109,9 @@ px_diag_analyzer/
 The analyzer was originally built for:
 
 ```
-Cluster:  px-cluster-plnpevipspoke11
+Cluster:  px-cluster-sen
 UUID:     b9462820-8db9-4088-9801-563dcc31d237
-Node:     pxpvip1331919.gsm1900.org (192.168.11.113)
+Node:     sens.gsm1900.org (192.168.xx.xxx)
 PX:       3.5.2.0-86e5708 | RHCOS 418.94 | OpenShift
 ```
 
